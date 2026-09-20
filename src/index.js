@@ -23,8 +23,25 @@ import {
   parseReport,
 } from './parsing.js';
 import { addAccepted, addRejected, duplicateMessage, findDuplicate, parseUserId, removeByLink } from './manual.js';
-import { memoMessages } from './memo.js';
-import { Staff, addModal, addRoleKey, isStaffInteractionId, modalRoleKey, panelMessage, roleByKey } from './staff.js';
+import { ActingFor } from './acting.js';
+import { leadershipMessage, memoMessages, unregisteredMessage } from './memo.js';
+import {
+  INSTRUCTOR_BUTTONS,
+  INSTRUCTOR_MODALS,
+  NAME_BUTTON_ID,
+  NAME_MODAL_ID,
+  Staff,
+  addModal,
+  addRoleKey,
+  instructorModal,
+  instructorPanelMessage,
+  isInstructorInteractionId,
+  isStaffInteractionId,
+  modalRoleKey,
+  nameModal,
+  panelMessage,
+  roleByKey,
+} from './staff.js';
 import { statsMessages } from './stats.js';
 import { Store } from './store.js';
 
@@ -41,10 +58,12 @@ if (!DISCORD_TOKEN) {
 }
 
 const allowedUsers = new Set(ALLOWED_USER_IDS.split(',').map((s) => s.trim()).filter(Boolean));
-const staff = new Staff(path.join(DATA_DIR, 'staff.json'));
+const staff = new Staff(path.join(DATA_DIR, 'staff.json'), OWNER_USER_ID);
 
-const isOwner = (userId) => OWNER_USER_ID !== '' && userId === OWNER_USER_ID;
-/** Руководство: владелец, админы, начальники отдела и их заместители. Старший состав (инструкторы) сюда не входит. */
+const actingFor = new ActingFor();
+
+const isOwner = (userId) => staff.isOwner(userId);
+/** Руководство: владелец и все уровни выше инструктора. */
 const isManager = (userId) => isOwner(userId) || staff.isManager(userId);
 const isStaff = (userId) => isOwner(userId) || staff.has(userId);
 
@@ -77,7 +96,7 @@ const client = new Client({
 
 /**
  * Кто может пользоваться ботом. Пока не задан ни ALLOWED_USER_IDS, ни OWNER_USER_ID — все;
- * после этого — только они, владелец и добавленные через /админ и /старший-состав.
+ * после этого — только они, владелец и добавленные через /старший-состав.
  */
 const isUserAllowed = (userId) =>
   (allowedUsers.size === 0 && OWNER_USER_ID === '') || allowedUsers.has(userId) || isStaff(userId);
@@ -108,23 +127,25 @@ const numberOption = (name, description) => ({
 });
 
 // Необязательное поле в командах добавления: записать отчёт в список другого проверяющего.
-const forOption = textOption('проверяющий', 'Записать отчёт за другого проверяющего (ID). Пусто: на вас', false);
+const forOption = textOption('проверяющий', 'Только старший состав: записать за инструктора (ID). Пусто: на вас', false);
 
-/** Чей список пополняем: свой или (за другого) чужой; за других могут только старший состав и выше. */
+/** Чей список пополняем: свой или (за другого) список инструктора; за других могут только старший состав и владелец. */
 function targetStore(userId, i) {
   const forWho = i.options.getString('проверяющий');
   if (!forWho) return { store: storeFor(userId) };
-  if (!isStaff(userId)) return { error: 'Записывать отчёты за других может только старший состав и выше.' };
+  if (!staff.canManageInstructors(userId)) {
+    return { error: 'Записывать отчёты за других может только старший состав. Инструктор записывает свои.' };
+  }
   const id = parseUserId(forWho);
-  return id
-    ? { store: storeFor(id) }
-    : { error: 'Не похоже на ID проверяющего: нужно число из 17–20 цифр (или упоминание).' };
+  if (!id) return { error: 'Не похоже на ID инструктора: нужно число из 17–20 цифр (или упоминание).' };
+  if (!staff.isInstructor(id)) return { error: `<@${id}> нет в списке инструкторов: сначала добавьте его через /инструктор.` };
+  return { store: storeFor(id) };
 }
 
-const managersOnly = (text) => `Нет доступа: ${text} для админов, начальников отдела и их заместителей.`;
+const managersOnly = (text) => `Нет доступа: ${text} для руководства (уровни выше инструктора).`;
 
-// Слэш-команды. run(userId, interaction) возвращает список сообщений для ответа;
-// handle(interaction) — если команда отвечает сама (эмбед с кнопками).
+// Слэш-команды. run(userId, interaction) возвращает список сообщений для ответа:
+// строки или готовое содержимое ({ embeds, components }). open — доступна и незарегистрированным.
 const COMMANDS = {
   'добавить-принятый': {
     description: 'Добавить принятый отчёт вручную',
@@ -234,30 +255,48 @@ const COMMANDS = {
   },
 
   'старший-состав': {
-    description: 'Добавить инструктора отдела в старший состав',
-    options: [textOption('id', 'ID инструктора (числом или упоминанием)')],
-    run(userId, i) {
-      if (!isManager(userId)) return [managersOnly('команда доступна')];
-      const id = parseUserId(i.options.getString('id', true));
-      if (!id) return ['Не похоже на ID человека: нужно число из 17–20 цифр (или упоминание).'];
-      return [staff.add('senior-staff', id) ? `Добавлен в старший состав: <@${id}>` : `<@${id}> уже в старшем составе.`];
-    },
-  },
-
-  'админ': {
-    description: 'Админ-панель (только для владельца)',
-    handle(interaction) {
-      if (!isOwner(interaction.user.id)) {
-        const text = OWNER_USER_ID ? 'Панель доступна только владельцу бота.' : 'Не задана переменная OWNER_USER_ID.';
-        return interaction.reply({ content: text, flags: MessageFlags.Ephemeral });
+    description: 'Старший состав: добавить человека выше инструктора и изменить имя',
+    run(userId) {
+      if (!staff.assignableSeniorRoles(userId).length) {
+        return [
+          OWNER_USER_ID
+            ? 'Нет доступа: старший состав добавляют владелец и уровни выше заместителя начальника отдела.'
+            : 'Не задана переменная OWNER_USER_ID.',
+        ];
       }
-      return interaction.reply({ ...panelMessage(staff), flags: MessageFlags.Ephemeral });
+      return [panelMessage(staff, userId)];
     },
   },
 
-  'памятка': {
-    description: 'Как пользоваться ботом: шаги и формат проверки',
-    run: () => memoMessages(client.user?.username),
+  'инструктор': {
+    description: 'Инструкторы: добавить, убрать, добавить или убрать отчёт',
+    run(userId) {
+      if (!staff.canManageInstructors(userId)) {
+        return [
+          OWNER_USER_ID
+            ? 'Нет доступа: инструкторов ведёт старший состав.'
+            : 'Не задана переменная OWNER_USER_ID.',
+        ];
+      }
+      return [instructorPanelMessage(staff)];
+    },
+  },
+
+  'помощь': {
+    description: 'Как пользоваться ботом (зависит от вашего уровня)',
+    open: true, // отвечает и тем, кого нет в системе
+    run(userId) {
+      if (!isUserAllowed(userId)) return [unregisteredMessage(userId)];
+      const messages = memoMessages(client.user?.username);
+      const addable = staff.assignableSeniorRoles(userId).map((r) => r.label);
+      const canInstructors = staff.canManageInstructors(userId);
+      const canReports = isManager(userId);
+      if (addable.length || canInstructors || canReports) {
+        const level = isOwner(userId) ? 'Владелец' : staff.rolesOf(userId) || 'Ваш уровень';
+        messages.push(leadershipMessage({ level, addable, canInstructors, canReports }));
+      }
+      return messages;
+    },
   },
 
   'статус': {
@@ -267,6 +306,8 @@ const COMMANDS = {
       const entries = store.entries();
       const accepted = entries.filter((e) => e.verdict.accepted).length;
       const lines = [`Принято: ${accepted}, отказано: ${entries.length - accepted}`];
+      const acting = actingFor.get(userId);
+      if (acting) lines.push(`Сейчас отчёты записываются за <@${acting}> (до записи пары «отчёт + проверка»).`);
       const pending = store.pendingReports();
       if (pending.length) {
         lines.push('Отчёты без проверки:', ...pending.map(({ report }) => `- ${report.name} (${report.total ?? '?'} б.)`));
@@ -303,68 +344,163 @@ client.once(Events.ClientReady, async (c) => {
   console.log(`Слэш-команды зарегистрированы: ${Object.keys(COMMANDS).map((n) => `/${n}`).join(', ')}`);
 });
 
-/** Кнопки и окна панели /админ: работают только у владельца. */
-async function onPanelInteraction(interaction) {
-  if (!isOwner(interaction.user.id)) {
-    return interaction.reply({ content: 'Панель доступна только владельцу бота.', flags: MessageFlags.Ephemeral });
-  }
+const denyPanel = (interaction, text) => interaction.reply({ content: text, flags: MessageFlags.Ephemeral });
+const NOT_LOWER = 'Недостаточно прав: добавлять и менять можно только тех, кто ниже вас по уровню.';
+
+const NOT_MANAGER = 'Недостаточно прав: инструкторов ведёт старший состав.';
+const replyHere = (interaction, payload) =>
+  interaction.reply({ ...payload, flags: interaction.inGuild() ? MessageFlags.Ephemeral : undefined });
+
+/** Кнопки и окна панели /инструктор. Права проверяются при каждом действии. */
+async function onInstructorInteraction(interaction) {
+  const actorId = interaction.user.id;
+  if (!staff.canManageInstructors(actorId)) return denyPanel(interaction, NOT_MANAGER);
+
+  const kindOf = (ids) => Object.keys(ids).find((k) => ids[k] === interaction.customId);
+
+  // Нажатия кнопок открывают окно ввода.
   if (interaction.isButton()) {
-    const role = roleByKey(addRoleKey(interaction.customId));
-    return role ? interaction.showModal(addModal(role)) : undefined;
+    const kind = kindOf(INSTRUCTOR_BUTTONS);
+    return kind ? interaction.showModal(instructorModal(kind)) : undefined;
   }
-  const role = roleByKey(modalRoleKey(interaction.customId));
-  const userId = parseUserId(interaction.fields.getTextInputValue('user'));
-  if (!role || !userId) {
-    return interaction.reply({
-      content: 'Не похоже на ID человека: нужно число из 17–20 цифр (или упоминание).',
-      flags: MessageFlags.Ephemeral,
+
+  const kind = kindOf(INSTRUCTOR_MODALS);
+  const refreshPanel = () => {
+    const panel = instructorPanelMessage(staff);
+    return interaction.isFromMessage() ? interaction.update(panel) : replyHere(interaction, panel);
+  };
+
+  // «Убрать отчёт инструктору»: достаточно ссылки на отчёт.
+  if (kind === 'removeReport') {
+    const link = interaction.fields.getTextInputValue('link');
+    const removed = [];
+    for (const { checkerId, store } of everyStore()) {
+      const result = removeByLink(store, link);
+      if (result.error) return denyPanel(interaction, result.error);
+      if (result.removed) removed.push(`${result.name ?? 'без имени'} (инструктор <@${checkerId}>)`);
+    }
+    return replyHere(interaction, {
+      content: removed.length ? `Удалено: ${removed.join(', ')}` : 'Такого отчёта не найдено.',
+      allowedMentions: noPings,
     });
   }
-  staff.add(role.key, userId);
-  const panel = panelMessage(staff);
+
+  const userId = parseUserId(interaction.fields.getTextInputValue('user'));
+  if (!userId) return denyPanel(interaction, 'Не похоже на ID инструктора: нужно число из 17–20 цифр (или упоминание).');
+
+  switch (kind) {
+    case 'add':
+      if (!staff.canAssign(actorId, 'instructor', userId)) return denyPanel(interaction, NOT_LOWER);
+      staff.add('instructor', userId, interaction.fields.getTextInputValue('name'));
+      return refreshPanel();
+    case 'remove':
+      if (!staff.removeInstructor(userId)) return denyPanel(interaction, `<@${userId}> нет в списке инструкторов.`);
+      return refreshPanel();
+    case 'addReport':
+      if (!staff.isInstructor(userId)) {
+        return denyPanel(interaction, `<@${userId}> нет в списке инструкторов: сначала добавьте его.`);
+      }
+      actingFor.set(actorId, userId);
+      return replyHere(interaction, {
+        content:
+          `Записываю отчёты за <@${userId}>. Перешлите мне в личные сообщения отчёт, затем отправьте проверку по формату из /помощь. ` +
+          'Режим сбросится после записи пары «отчёт + проверка» или через 30 минут.',
+        allowedMentions: noPings,
+      });
+    default:
+      return undefined;
+  }
+}
+
+/** Кнопки и окна панели /старший-состав. Права проверяются при каждом действии, а не только при открытии. */
+async function onPanelInteraction(interaction) {
+  const actorId = interaction.user.id;
+  if (!staff.assignableSeniorRoles(actorId).length) return denyPanel(interaction, NOT_LOWER);
+
+  // Нажатия кнопок открывают окно ввода.
+  if (interaction.isButton()) {
+    if (interaction.customId === NAME_BUTTON_ID) return interaction.showModal(nameModal());
+    const role = roleByKey(addRoleKey(interaction.customId));
+    if (!role || !staff.assignableSeniorRoles(actorId).some((r) => r.key === role.key)) return denyPanel(interaction, NOT_LOWER);
+    return interaction.showModal(addModal(role));
+  }
+
+  // Отправка окна ввода.
+  const userId = parseUserId(interaction.fields.getTextInputValue('user'));
+  if (!userId) {
+    return denyPanel(interaction, 'Не похоже на ID человека: нужно число из 17–20 цифр (или упоминание).');
+  }
+  const name = interaction.fields.getTextInputValue('name');
+
+  if (interaction.customId === NAME_MODAL_ID) {
+    if (!staff.canEdit(actorId, userId)) return denyPanel(interaction, NOT_LOWER);
+    staff.setName(userId, name);
+  } else {
+    const role = roleByKey(modalRoleKey(interaction.customId));
+    if (!role || !staff.canAssign(actorId, role.key, userId)) return denyPanel(interaction, NOT_LOWER);
+    staff.add(role.key, userId, name);
+  }
+
+  const panel = panelMessage(staff, actorId);
   return interaction.isFromMessage() ? interaction.update(panel) : interaction.reply({ ...panel, flags: MessageFlags.Ephemeral });
+}
+
+/**
+ * Доставка ответа команды. Сообщение — строка или готовое содержимое ({ embeds, components }).
+ * В личке с ботом: первое сообщение — ответ на команду, остальные обычными сообщениями друг за другом
+ * (follow-up'ы Discord показывает как ответы на предыдущее).
+ * На сервере: всё уходит вам в личные сообщения, а в канале виден только короткий ответ, который видите лишь вы.
+ */
+async function deliver(interaction, messages) {
+  const payloads = messages.map((m) => ({ ...(typeof m === 'string' ? { content: m } : m), allowedMentions: noPings }));
+
+  if (!interaction.inGuild()) {
+    const [first, ...rest] = payloads;
+    await interaction.editReply(first);
+    let channel = interaction.channel ?? (await interaction.user.createDM().catch(() => null));
+    for (const payload of rest) {
+      if (channel) {
+        try {
+          await channel.send(payload);
+          continue;
+        } catch {
+          channel = null; // нет доступа к чату — дальше follow-up'ами
+        }
+      }
+      await interaction.followUp(payload);
+    }
+    return;
+  }
+
+  try {
+    for (const payload of payloads) await interaction.user.send(payload);
+    await interaction.editReply({ content: 'Отправил вам в личные сообщения.' });
+  } catch {
+    // Личка закрыта: показываем здесь, но только вам.
+    await interaction.editReply({ content: 'Не удалось написать вам в личные сообщения, показываю здесь (видите только вы).' });
+    for (const payload of payloads) await interaction.followUp({ ...payload, flags: MessageFlags.Ephemeral });
+  }
 }
 
 client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isButton() || interaction.isModalSubmit()) {
-    if (isStaffInteractionId(interaction.customId)) {
-      onPanelInteraction(interaction).catch((err) => console.error('Ошибка панели:', err));
-    }
+    const handler = isStaffInteractionId(interaction.customId)
+      ? onPanelInteraction
+      : isInstructorInteractionId(interaction.customId)
+        ? onInstructorInteraction
+        : null;
+    handler?.(interaction).catch((err) => console.error('Ошибка панели:', err));
     return;
   }
   if (!interaction.isChatInputCommand()) return;
   const command = COMMANDS[interaction.commandName];
   if (!command) return;
-  if (!isUserAllowed(interaction.user.id)) {
-    return interaction.reply({
-      content: `Нет доступа: вашего ID (${interaction.user.id}) нет в ALLOWED_USER_IDS.`,
-      flags: MessageFlags.Ephemeral,
-    });
+  if (!command.open && !isUserAllowed(interaction.user.id)) {
+    return interaction.reply({ content: unregisteredMessage(interaction.user.id), flags: MessageFlags.Ephemeral });
   }
-  if (command.handle) {
-    return command.handle(interaction).catch((err) => console.error(`Ошибка команды /${interaction.commandName}:`, err));
-  }
-  // В личке с ботом и в канале CHANNEL_ID ответ обычный; в остальных серверных каналах его видит только вызвавший.
-  const publicHere = !interaction.inGuild() || interaction.channelId === CHANNEL_ID;
-  const flags = publicHere ? undefined : MessageFlags.Ephemeral;
   try {
-    await interaction.deferReply({ flags });
-    const [first, ...rest] = command.run(interaction.user.id, interaction);
-    await interaction.editReply({ content: first, allowedMentions: noPings });
-
-    // Остальные сообщения — обычными сообщениями друг за другом: follow-up'ы Discord показывает как ответы на предыдущее.
-    let channel = publicHere ? (interaction.channel ?? (await interaction.user.createDM().catch(() => null))) : null;
-    for (const content of rest) {
-      if (channel) {
-        try {
-          await channel.send({ content, allowedMentions: noPings });
-          continue;
-        } catch {
-          channel = null; // нет доступа к каналу — дальше follow-up'ами
-        }
-      }
-      await interaction.followUp({ content, flags, allowedMentions: noPings });
-    }
+    await interaction.deferReply({ flags: interaction.inGuild() ? MessageFlags.Ephemeral : undefined });
+    await deliver(interaction, command.run(interaction.user.id, interaction));
   } catch (err) {
     console.error(`Ошибка команды /${interaction.commandName}:`, err);
     const content = `Ошибка: ${err.message}`;
@@ -391,20 +527,26 @@ async function handleReport(message, report, { snapshot, text }) {
     return say(message, 'Это похоже на отчёт, но Discord не передал ссылку на исходное сообщение. Перешлите отчёт (Forward), а не копируйте.');
   }
 
-  const store = storeFor(message.author.id);
+  const { store, prefix } = workingStore(message.author.id);
   store.setReport(ref.messageId, { ...report, link: ref.link });
   const who = `${report.name} (ранг ${report.rank ?? '?'}, ${report.position ?? '?'})`;
   const verdict = store.verdict(ref.messageId);
-  if (!verdict) return say(message, `📄 Отчёт: ${who}, ${report.total ?? '?'} б. Жду проверку.`);
-  return say(message, `🔗 ${describe(store.entry(ref.messageId))}`);
+  if (!verdict) return say(message, `${prefix}📄 Отчёт: ${who}, ${report.total ?? '?'} б. Жду проверку.`);
+  return say(message, `${prefix}🔗 ${describe(store.entry(ref.messageId))}`);
+}
+
+/** Чей список пополняем: свой или (после «Добавить отчёт инструктору») список выбранного инструктора. */
+function workingStore(actorId) {
+  const targetId = actingFor.get(actorId);
+  return targetId ? { store: storeFor(targetId), prefix: `За <@${targetId}>: ` } : { store: storeFor(actorId), prefix: '' };
 }
 
 async function handleCheck(message, check, text) {
-  const store = storeFor(message.author.id);
+  const { store, prefix } = workingStore(message.author.id);
 
   // Один человек — один отчёт.
   const dup = findDuplicate(everyStore(), check.userId, check.messageId);
-  if (dup) return say(message, duplicateMessage(check.userId, dup));
+  if (dup) return say(message, `${prefix}${duplicateMessage(check.userId, dup)}`);
 
   // Ссылка в формах берётся из проверки. Но id пересланного отчёта не всегда совпадает с id из этой ссылки,
   // тогда отчёт ищем среди ещё не проверенных: по имени в нике, иначе единственный.
@@ -432,9 +574,10 @@ async function handleCheck(message, check, text) {
     const hint = waiting.length
       ? `Ждут проверки: ${waiting.join(', ')}, но в проверке нет имени, чтобы выбрать нужный. Отправьте проверку сразу после его отчёта.`
       : 'Сначала перешлите отчёт, потом отправьте проверку.';
-    return say(message, `Проверка сохранена, но отчёта для неё нет. ${hint}`);
+    return say(message, `${prefix}Проверка сохранена, но отчёта для неё нет. ${hint}`);
   }
-  return say(message, describe(entry));
+  actingFor.clear(message.author.id); // пара «отчёт + проверка» записана: режим «за инструктора» одноразовый
+  return say(message, `${prefix}${describe(entry)}`);
 }
 
 function describe({ verdict, report }) {
