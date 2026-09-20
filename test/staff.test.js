@@ -306,3 +306,23 @@ test('владелец может добавить в список и себя; 
   assert.equal(staff.canAssign('3', 'curator', '3'), false);
   assert.equal(staff.canAssign('3', 'general', '5'), false); // и поставить выше себя тоже
 });
+
+test('несколько владельцев: ID через запятую, у каждого полные права', () => {
+  const staff = new Staff(tempFile(), '900, 901 ,,');
+  for (const owner of ['900', '901']) {
+    assert.equal(staff.isOwner(owner), true);
+    assert.equal(staff.describeRank(owner), 'владелец');
+    assert.equal(staff.assignableRoles(owner).length, 6);
+    assert.equal(staff.canAssign(owner, 'general', '5'), true);
+    assert.equal(staff.canAssign(owner, 'general', owner), true); // и себя
+  }
+  assert.equal(staff.canAssign('900', 'instructor', '901'), true); // владельцы друг другу не мешают
+  assert.equal(staff.outranks('900', '901'), true);
+  assert.equal(staff.isOwner('902'), false);
+  assert.equal(new Staff(tempFile(), '').isOwner(''), false); // пустая настройка — владельцев нет
+});
+
+test('панель показывает метку сборки', () => {
+  const footer = panelMessage(tempStaff(), OWNER).embeds[0].toJSON().footer.text;
+  assert.match(footer, /^Сборка: /);
+});

@@ -53,16 +53,6 @@ test('добавить: неверный ID или ссылка — ошибка
   assert.equal(store.entries().length, 0);
 });
 
-test('добавить ту же ссылку повторно: заменяет, а не дублирует', () => {
-  const store = tempStore();
-  addAccepted(store, ACCEPTED);
-  addAccepted(store, { ...ACCEPTED, points: 60 });
-  addRejected(store, { id: ACCEPTED.id, name: 'Vladislav Siberyak', link: LINK, reason: 'Передумали' });
-  const entries = store.entries();
-  assert.equal(entries.length, 1);
-  assert.equal(entries[0].verdict.accepted, false);
-});
-
 test('удалить по ссылке: принятый и отказанный, соседний отчёт не тронут', () => {
   const store = tempStore();
   addAccepted(store, ACCEPTED);
@@ -88,46 +78,54 @@ test('удаление сохраняется на диск', () => {
   assert.equal(new Store(file).entries().length, 0);
 });
 
-test('один человек — один отчёт: повтор ID у любого проверяющего — ошибка', () => {
+test('одна ссылка — один отчёт: повторно добавить ту же ссылку нельзя, старая запись остаётся', () => {
+  const store = tempStore();
+  assert.equal(addAccepted(store, ACCEPTED).error, undefined);
+
+  const again = addAccepted(store, { ...ACCEPTED, points: 60 });
+  assert.match(again.error, /эта ссылка уже добавлена/);
+  assert.match(again.error, /\/удалить-отчет/);
+  const rejectedAgain = addRejected(store, { id: ACCEPTED.id, name: 'Vladislav Siberyak', link: LINK, reason: 'Передумали' });
+  assert.match(rejectedAgain.error, /эта ссылка уже добавлена/);
+
+  const entries = store.entries();
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].verdict.accepted, true);
+  assert.equal(entries[0].verdict.points, 125); // не перезаписалось
+});
+
+test('одна ссылка — один отчёт: проверяется у всех проверяющих сразу', () => {
   const a = tempStore();
   const b = tempStore();
   const stores = [{ checkerId: '111', store: a }, { checkerId: '222', store: b }];
   addAccepted(a, ACCEPTED, stores);
 
-  // тот же человек, другая ссылка, другой проверяющий
-  const other = OTHER;
-  const r1 = addAccepted(b, { ...ACCEPTED, link: other }, stores);
-  assert.match(r1.error, /уже есть отчёт/);
-  assert.match(r1.error, /<@111>/); // видно, кто проверил
+  // та же ссылка у другого проверяющего, даже на другого человека
+  const r = addAccepted(b, { ...ACCEPTED, id: '466633638511902752' }, stores);
+  assert.match(r.error, /<@111>/); // видно, кто проверил
+  assert.match(r.error, /<@621978844894593026>/); // и чей это отчёт
   assert.equal(b.entries().length, 0);
-
-  // и отказ на того же человека — тоже ошибка
-  const r2 = addRejected(b, { id: ACCEPTED.id, name: 'X', link: other, reason: 'р' }, stores);
-  assert.match(r2.error, /уже есть отчёт/);
 });
 
-test('один человек — один отчёт: имя, ранг, должность и баллы могут повторяться; тот же отчёт перезаписывается', () => {
-  const store = tempStore();
-  const stores = [{ checkerId: '1', store }];
-  addAccepted(store, ACCEPTED, stores);
+test('у одного человека отчётов может быть сколько угодно, если ссылки разные', () => {
+  const a = tempStore();
+  const b = tempStore();
+  const stores = [{ checkerId: '111', store: a }, { checkerId: '222', store: b }];
+  const link = (n) => LINK.slice(0, -1) + n;
 
-  // другой человек с теми же именем, рангом, должностью и баллами — можно
-  const twin = addAccepted(store, { ...ACCEPTED, id: '466633638511902752', link: OTHER }, stores);
-  assert.equal(twin.error, undefined);
-  assert.equal(store.entries().length, 2);
-
-  // тот же человек и та же ссылка — это поправка, а не дубль
-  assert.equal(addAccepted(store, { ...ACCEPTED, points: 70 }, stores).error, undefined);
-  assert.equal(store.entries().length, 2);
+  assert.equal(addAccepted(a, { ...ACCEPTED, link: link(3), points: 60 }, stores).error, undefined);
+  assert.equal(addAccepted(a, { ...ACCEPTED, link: link(4), points: 125 }, stores).error, undefined);
+  assert.equal(addAccepted(b, { ...ACCEPTED, link: link(5), points: 90 }, stores).error, undefined); // и у другого проверяющего
+  assert.equal(addRejected(b, { id: ACCEPTED.id, name: ACCEPTED.name, link: link(6), reason: 'нет скриншотов' }, stores).error, undefined);
+  assert.equal(a.entries().length + b.entries().length, 4);
 });
 
-test('findDuplicate: находит только другой отчёт того же человека', () => {
+test('findDuplicate: ищет по ссылке, а не по человеку', () => {
   const store = tempStore();
   addAccepted(store, ACCEPTED);
   const stores = [{ checkerId: '1', store }];
-  assert.equal(findDuplicate(stores, ACCEPTED.id, '1548582679338024982'), null);
-  assert.equal(findDuplicate(stores, ACCEPTED.id, '999').checkerId, '1');
-  assert.equal(findDuplicate(stores, '466633638511902752', '999'), null);
+  assert.equal(findDuplicate(stores, '1548582679338024982').checkerId, '1');
+  assert.equal(findDuplicate(stores, '999'), null); // другая ссылка — не дубль, хоть человек тот же
 });
 
 test('ошибка про ID показывает, что ввели, и подсказывает, где взять ID', () => {

@@ -33,6 +33,7 @@ import {
   removeByLinkAllowed,
 } from './manual.js';
 import { ActingFor } from './acting.js';
+import { BUILD } from './build.js';
 import { leadershipMessage, memoMessages, unregisteredMessage } from './memo.js';
 import {
   STAFF_BUTTONS,
@@ -105,7 +106,7 @@ const client = new Client({
 const isUserAllowed = (userId) =>
   (allowedUsers.size === 0 && OWNER_USER_ID === '') || allowedUsers.has(userId) || isStaff(userId);
 
-/** Хранилища всех проверяющих — для проверки «один человек — один отчёт» и общих команд. */
+/** Хранилища всех проверяющих — для проверки «одна ссылка — один отчёт» и общих команд. */
 const everyStore = () => allCheckerIds().map((checkerId) => ({ checkerId, store: storeFor(checkerId) }));
 
 /** Пересланные сообщения принимаем только в личке и (если задан) в одном канале, и только от разрешённых пользователей. */
@@ -326,7 +327,7 @@ const COMMANDS = {
 };
 
 client.once(Events.ClientReady, async (c) => {
-  console.log(`Бот запущен как ${c.user.tag}`);
+  console.log(`Бот запущен как ${c.user.tag}. Сборка: ${BUILD}`);
   await c.application.commands.set(
     Object.entries(COMMANDS).map(([name, { description, options }]) => ({
       name,
@@ -520,9 +521,9 @@ function workingStore(actorId) {
 async function handleCheck(message, check, text) {
   const { store, prefix } = workingStore(message.author.id);
 
-  // Один человек — один отчёт.
-  const dup = findDuplicate(everyStore(), check.userId, check.messageId);
-  if (dup) return say(message, `${prefix}${duplicateMessage(check.userId, dup)}`);
+  // Одна ссылка — один отчёт (у человека отчётов может быть сколько угодно).
+  const dup = findDuplicate(everyStore(), check.messageId);
+  if (dup) return say(message, `${prefix}${duplicateMessage(dup)}`);
 
   // Ссылка в формах берётся из проверки. Но id пересланного отчёта не всегда совпадает с id из этой ссылки,
   // тогда отчёт ищем среди ещё не проверенных: по имени в нике, иначе единственный.

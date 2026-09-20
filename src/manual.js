@@ -27,31 +27,33 @@ function checkCommon({ id, link }) {
 }
 
 /**
- * Один человек (Discord ID) — один отчёт: ищет у любого проверяющего другой отчёт на того же человека.
- * stores: [{ checkerId, store }]. Тот же самый отчёт (та же ссылка) не считается, его можно перезаписать.
+ * Одна ссылка — один отчёт: ищет проверку с этой ссылкой у любого проверяющего.
+ * У одного человека отчётов может быть сколько угодно, повторяться не должна только ссылка.
+ * stores: [{ checkerId, store }].
  */
-export function findDuplicate(stores, userId, messageId) {
+export function findDuplicate(stores, messageId) {
   for (const { checkerId, store } of stores) {
-    const entry = store.entries().find((e) => e.verdict.userId === userId && e.messageId !== messageId);
+    const entry = store.entries().find((e) => e.messageId === messageId);
     if (entry) return { checkerId, entry };
   }
   return null;
 }
 
-export function duplicateMessage(userId, { checkerId, entry }) {
-  const by = checkerId ? ` (проверил <@${checkerId}>)` : '';
-  return `Ошибка: на <@${userId}> уже есть отчёт: ${entry.verdict.link}${by}. Один человек — один отчёт; сначала удалите старый через /удалить-отчет.`;
+export function duplicateMessage({ checkerId, entry }) {
+  const { verdict } = entry;
+  const by = checkerId ? `, проверил <@${checkerId}>` : '';
+  return `Ошибка: эта ссылка уже добавлена: ${verdict.link} (<@${verdict.userId}>${by}). Одна ссылка — один отчёт; сначала удалите старый через /удалить-отчет.`;
 }
 
 /** Общая проверка полей и дубля. Возвращает { error } или { userId, ref }. */
 function checkNew(input, stores) {
   const c = checkCommon(input);
   if (c.error) return c;
-  const dup = findDuplicate(stores, c.userId, c.ref.messageId);
-  return dup ? { error: duplicateMessage(c.userId, dup) } : c;
+  const dup = findDuplicate(stores, c.ref.messageId);
+  return dup ? { error: duplicateMessage(dup) } : c;
 }
 
-/** Добавляет (или заменяет) принятый отчёт. Возвращает { entry } или { error }. */
+/** Добавляет принятый отчёт. Возвращает { entry } или { error } (например, если такая ссылка уже есть). */
 export function addAccepted(store, { id, name, link, points, rank, position }, stores = [{ checkerId: '', store }]) {
   const c = checkNew({ id, link }, stores);
   if (c.error) return c;
@@ -69,7 +71,7 @@ export function addAccepted(store, { id, name, link, points, rank, position }, s
   return { entry: store.entry(c.ref.messageId) };
 }
 
-/** Добавляет (или заменяет) отказанный отчёт. Возвращает { entry } или { error }. */
+/** Добавляет отказанный отчёт. Возвращает { entry } или { error }. */
 export function addRejected(store, { id, name, link, reason }, stores = [{ checkerId: '', store }]) {
   const c = checkNew({ id, link }, stores);
   if (c.error) return c;

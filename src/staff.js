@@ -10,6 +10,7 @@ import {
   TextInputBuilder,
   TextInputStyle,
 } from 'discord.js';
+import { BUILD } from './build.js';
 
 // Чем больше число, тем выше ранг. Число показывается в списке в скобках и вводится при добавлении.
 export const STAFF_ROLES = [
@@ -38,7 +39,8 @@ export const roleTitle = (role) => `[${role.rank}] ${role.label}`;
 export class Staff {
   constructor(file, ownerId = '') {
     this.file = file;
-    this.ownerId = ownerId;
+    // Владельцев может быть несколько: ID через запятую.
+    this.ownerIds = new Set(ownerId.split(',').map((id) => id.trim()).filter(Boolean));
     this.data = {};
     let raw = {};
     try {
@@ -54,7 +56,7 @@ export class Staff {
   }
 
   isOwner(userId) {
-    return this.ownerId !== '' && userId === this.ownerId;
+    return this.ownerIds.has(userId);
   }
 
   members(key) {
@@ -197,7 +199,8 @@ export function panelMessage(staff, actorId) {
   const embed = new EmbedBuilder()
     .setTitle('Старший состав')
     .setDescription('Ранг в скобках. Добавить: ранг, ID, имя и фамилия. Убрать: ID. Трогать можно только тех, кто ниже вас.')
-    .addFields(STAFF_ROLES.map((role) => ({ name: roleTitle(role), value: fieldValue(staff.members(role.key)) })));
+    .addFields(STAFF_ROLES.map((role) => ({ name: roleTitle(role), value: fieldValue(staff.members(role.key)) })))
+    .setFooter({ text: `Сборка: ${BUILD}` });
 
   if (!staff.assignableRoles(actorId).length) return { embeds: [embed], components: [] };
 

@@ -179,21 +179,86 @@ test('формы: нет принятых и премий — пишется «�
   assert.match(parts[3],/Кто будет составлять премии\*\*\n-# .+\nнету/);
 });
 
-test('общий отчёт: блоки «Проверил» на каждого, премии одним списком, дубли отмечаются', () => {
+test('общий отчёт: блоки «Проверил» на каждого, премии одним списком, повторная ссылка отмечается', () => {
   const report = { name: 'Name Surname', rank: '12', position: 'Delta', total: 100 };
   const a = { messageId: '1', verdict: parseCheck(ACCEPTED), report };
   const b = { messageId: '2', verdict: parseCheck(REJECTED), report };
   const parts = buildForms([
     { checkerId: '111', entries: [a] },
-    { checkerId: '222', entries: [b, { ...a }] }, // отчёт «1» проверили оба
+    { checkerId: '222', entries: [b, { ...a }] }, // одна и та же ссылка у обоих
   ]);
   const text = parts.join('\n');
-  assert.match(text,/\*\*Проверил:\*\* <@111>/);
-  assert.match(text,/\*\*Проверил:\*\* <@222>/);
+  assert.match(text, /\*\*Проверил:\*\* <@111>/);
+  assert.match(text, /\*\*Проверил:\*\* <@222>/);
   assert.equal(parts.filter((m) => m.includes('Кто будет составлять премии')).length, 1);
   const premiums = parts.find((m) => m.includes('Кто будет составлять премии'));
-  assert.equal((premiums.match(/^- Name Surname \|/gm) ?? []).length, 2); // в форме 3 — обе принятые строки
-  assert.match(text,/Отчёт проверили несколько человек/);
+  assert.equal((premiums.match(/^- Name Surname \|/gm) ?? []).length, 1); // один человек — одна строка
+  assert.match(text, /Отчёт проверили несколько человек/);
+});
+
+// ── Премии: у человека много отчётов, в форму 3 идёт один — принятый с максимумом баллов ─────────────
+
+const entry = (messageId, userId, { accepted = true, points = 100, name = 'Vladislav Siberyak' } = {}) => ({
+  messageId,
+  verdict: { userId, accepted, points: accepted ? points : null, minimum: null, reason: accepted ? null : 'нет скриншотов', link: `${LINK}${messageId}` },
+  report: { name, rank: '12', position: 'Delta', total: points },
+});
+
+test('премия: из нескольких отчётов человека берётся принятый с максимумом баллов', () => {
+  const rows = formRows([
+    entry('1', '10', { points: 60 }),
+    entry('2', '10', { points: 125 }),
+    entry('3', '10', { points: 90 }),
+  ]);
+  assert.equal(rows.bonuses.length, 1);
+  assert.match(rows.bonuses[0], /\| 125 \| Высокая$/);
+  assert.match(rows.bonuses[0], /2 \| 125/); // ссылка на тот самый отчёт с максимумом
+  assert.equal(rows.accepted.length, 3); // в списке принятых остались все три
+});
+
+test('премия: отказанные не участвуют, даже если баллов «больше»', () => {
+  const rows = formRows([
+    entry('1', '10', { accepted: false, points: 500 }),
+    entry('2', '10', { points: 70 }),
+  ]);
+  assert.equal(rows.bonuses.length, 1);
+  assert.match(rows.bonuses[0], /\| 70 \| Средняя$/);
+  assert.equal(rows.rejected.length, 1); // а в списке отказанных он есть
+
+  // только отказанные: человека в премии нет
+  assert.deepEqual(formRows([entry('1', '10', { accepted: false })]).bonuses, []);
+});
+
+test('премия: по одной строке на каждого человека, при равных баллах — первый отчёт', () => {
+  const rows = formRows([
+    entry('1', '10', { points: 80 }),
+    entry('2', '20', { points: 80, name: 'Santa Siberyak' }),
+    entry('3', '10', { points: 80 }), // равно первому: остаётся первый
+    entry('4', '20', { points: 210, name: 'Santa Siberyak' }),
+  ]);
+  assert.equal(rows.bonuses.length, 2);
+  // ссылка отчёта = LINK + его номер: у Vladislav берётся отчёт «1», а не «3», у Santa — «4», а не «2»
+  assert.match(rows.bonuses[0], /^Vladislav Siberyak \| 12 \| Delta \| .*9821 \| 80 \| Средняя$/);
+  assert.match(rows.bonuses[1], /^Santa Siberyak \| 12 \| Delta \| .*9824 \| 210 \| Повышенная$/);
+});
+
+test('премия: общий отчёт выбирает лучший отчёт человека среди всех проверяющих', () => {
+  const parts = buildForms([
+    { checkerId: '111', entries: [entry('1', '10', { points: 60 })] },
+    { checkerId: '222', entries: [entry('2', '10', { points: 125 })] }, // тот же человек у другого проверяющего
+  ]);
+  const premiums = parts.find((m) => m.includes('Кто будет составлять премии'));
+  assert.equal((premiums.match(/^- Vladislav Siberyak \|/gm) ?? []).length, 1); // один человек — одна строка
+  assert.match(premiums, /2 \| 125 \| Высокая/);
+  // а в списках принятых у каждого проверяющего его отчёт на месте
+  assert.equal(parts.filter((m) => m.includes('Принятые отчёты') && m.includes('| Vladislav Siberyak |')).length, 2);
+});
+
+test('премия: предупреждение про «ниже 10 баллов» только про лучший отчёт', () => {
+  // лучший отчёт человека — 5 баллов: тип не определён
+  assert.equal(formRows([entry('1', '10', { points: 5 })]).warnings.length, 1);
+  // 5 баллов — не лучший отчёт: лишнего предупреждения нет
+  assert.deepEqual(formRows([entry('1', '10', { points: 5 }), entry('2', '10', { points: 60 })]).warnings, []);
 });
 
 // Проверка так, как её видит бот в реальном сообщении: упоминание, **жирный** текст, «-#» мелкий шрифт.
