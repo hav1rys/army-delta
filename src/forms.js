@@ -1,5 +1,5 @@
 // Сборка трёх форм из накопленных проверок.
-import { bonusType, toGameNick } from './parsing.js';
+import { bonusType } from './parsing.js';
 
 const LIMIT = 1900; // запас до лимита Discord в 2000 символов
 const UNKNOWN = '???';
@@ -41,7 +41,7 @@ export function formRows(entries) {
 
     bonuses.push(
       [
-        report ? toGameNick(report.name) : UNKNOWN,
+        name, // как в графе «Сотрудник», без изменений
         report?.rank ?? verdict.rank ?? UNKNOWN, // ранг и должность — из отчёта («Подполковник (12)», «отчёт Delta»)
         report?.position ?? verdict.position ?? UNKNOWN, // ник из проверки — только если отчёта нет
         formLink3(verdict.link),

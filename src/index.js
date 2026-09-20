@@ -21,6 +21,7 @@ import {
   parseCheck,
   parseReport,
 } from './parsing.js';
+import { memoMessages } from './memo.js';
 import { Store } from './store.js';
 
 const {
@@ -91,6 +92,11 @@ const COMMANDS = {
         .filter((g) => g.entries.length);
       return groups.length ? buildForms(groups) : ['Пока нет ни одной проверки.'];
     },
+  },
+
+  'памятка': {
+    description: 'Как пользоваться ботом: шаги и формат проверки',
+    run: () => memoMessages(client.user?.username),
   },
 
   'статус': {
@@ -266,7 +272,7 @@ async function onMessage(message) {
     const list = problem.problems.map((p) => `- ${p}`).join('\n');
     return say(message, `Не могу принять ${what}, не хватает:\n${list}`);
   }
-  return say(message, 'Не понял, что это. Жду пересланный отчёт или проверку (ссылка на отчёт, «id | ник ...», баллы или причина отказа). Команды: /отчет, /общий-отчет, /статус, /очистить.');
+  return say(message, 'Не понял, что это. Жду пересланный отчёт или проверку (ссылка на отчёт, «id | ник ...», баллы или причина отказа). Команды: /памятка, /отчет, /общий-отчет, /статус, /очистить.');
 }
 
 process.on('unhandledRejection', (err) => console.error('Ошибка:', err));

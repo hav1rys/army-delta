@@ -185,6 +185,3 @@ export function matchPendingReport(pending, text) {
   const byName = pending.filter(({ report }) => hay.includes(normName(report.name)));
   return byName.at(-1) ?? (pending.length === 1 ? pending[0] : null);
 }
-
-/** «Имя Фамилия» -> «Имя_Фамилия» (формат игрового ника для формы 3). */
-export const toGameNick = (name) => name.trim().replace(/\s+/g, '_');

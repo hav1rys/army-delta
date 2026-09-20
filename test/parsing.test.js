@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildForms, formRows } from '../src/forms.js';
+import { ACCEPTED_TEMPLATE, REJECTED_TEMPLATE, memoMessages } from '../src/memo.js';
 import { bonusType, diagnose, flattenEmbeds, matchPendingReport, parseCheck, parseReport } from '../src/parsing.js';
 
 const LINK = 'https://discord.com/channels/713076174108229712/1027944923829383188/1548582679338024982';
@@ -140,8 +141,8 @@ test('формы: принятый, отказанный и премия', () =>
   ];
   const rows = formRows(entries);
   assert.deepEqual(rows.accepted, [`<@621978844894593026> | Vladislav Siberyak | ${LINK} | 125`]);
-  assert.match(rows.rejected[0], /^<@466633638511902752> \| Santa Siberyak \| .+ \| У тебя альбом пуст$/);
-  assert.deepEqual(rows.bonuses, [`Vladislav_Siberyak | 12 | Delta | ${LINK3} | 125 | Высокая`]);
+  assert.match(rows.rejected[0],/^<@466633638511902752> \| Santa Siberyak \| .+ \| У тебя альбом пуст$/);
+  assert.deepEqual(rows.bonuses, [`Vladislav Siberyak | 12 | Delta | ${LINK3} | 125 | Высокая`]);
   assert.deepEqual(rows.warnings, []);
   assert.ok(buildForms([{ checkerId: '1', entries }]).every((m) => m.length <= 2000));
 });
@@ -165,7 +166,7 @@ test('формы: каждая часть — отдельное сообщен�
     fence(
       '**Кто будет составлять премии**\n' +
         '-# Имя Фамилия | Ранг | Должность | Ссылка на отчёт | Баллы | Тип премии\n' +
-        `- Vladislav_Siberyak | 12 | Delta | ${LINK3} | 125 | Высокая`,
+        `- Vladislav Siberyak | 12 | Delta | ${LINK3} | 125 | Высокая`,
     ),
   ]);
 });
@@ -174,8 +175,8 @@ test('формы: нет принятых и премий — пишется «�
   const report = { name: 'Santa Siberyak', rank: '12', position: 'Delta', total: 55 };
   const parts = buildForms([{ checkerId: '9', entries: [{ messageId: '2', verdict: parseCheck(REJECTED), report }] }]);
   assert.equal(parts.length, 4);
-  assert.match(parts[1], /Принятые отчёты:\*\*\n-# .+\nнету/);
-  assert.match(parts[3], /Кто будет составлять премии\*\*\n-# .+\nнету/);
+  assert.match(parts[1],/Принятые отчёты:\*\*\n-# .+\nнету/);
+  assert.match(parts[3],/Кто будет составлять премии\*\*\n-# .+\nнету/);
 });
 
 test('общий отчёт: блоки «Проверил» на каждого, премии одним списком, дубли отмечаются', () => {
@@ -187,11 +188,12 @@ test('общий отчёт: блоки «Проверил» на каждого
     { checkerId: '222', entries: [b, { ...a }] }, // отчёт «1» проверили оба
   ]);
   const text = parts.join('\n');
-  assert.match(text, /\*\*Проверил:\*\* <@111>/);
-  assert.match(text, /\*\*Проверил:\*\* <@222>/);
+  assert.match(text,/\*\*Проверил:\*\* <@111>/);
+  assert.match(text,/\*\*Проверил:\*\* <@222>/);
   assert.equal(parts.filter((m) => m.includes('Кто будет составлять премии')).length, 1);
-  assert.equal((text.match(/Vladislav|Name_Surname/g) ?? []).length, 2); // в форме 3 — обе принятые строки
-  assert.match(text, /Отчёт проверили несколько человек/);
+  const premiums = parts.find((m) => m.includes('Кто будет составлять премии'));
+  assert.equal((premiums.match(/^- Name Surname \|/gm) ?? []).length, 2); // в форме 3 — обе принятые строки
+  assert.match(text,/Отчёт проверили несколько человек/);
 });
 
 // Проверка так, как её видит бот в реальном сообщении: упоминание, **жирный** текст, «-#» мелкий шрифт.
@@ -228,9 +230,9 @@ test('ник: разные написания тега и ранга', () => {
 test('формы: ранг и должность берутся из отчёта, ник из проверки — только если отчёта нет', () => {
   const report = { name: 'Matvey Siberyak', rank: '11', position: 'Alpha', total: 90 };
   const fromReport = formRows([{ messageId: '1', verdict: parseCheck(REAL_CHECK), report }]);
-  assert.match(fromReport.bonuses[0], /^Matvey_Siberyak \| 11 \| Alpha \| /);
+  assert.match(fromReport.bonuses[0], /^Matvey Siberyak \| 11 \| Alpha \| /); // имя без замены пробела
   const noReport = formRows([{ messageId: '1', verdict: parseCheck(REAL_CHECK), report: null }]);
-  assert.match(noReport.bonuses[0], /^\?\?\? \| 12 \| Delta \| /);
+  assert.match(noReport.bonuses[0],/^\?\?\? \| 12 \| Delta \| /);
 });
 
 test('привязка отчёта: по имени в нике, иначе единственный ожидающий', () => {
@@ -240,6 +242,36 @@ test('привязка отчёта: по имени в нике, иначе е�
   assert.equal(matchPendingReport([a], REAL_CHECK).messageId, 'a'); // единственный, имени в нике нет
   assert.equal(matchPendingReport([a, { messageId: 'c', report: { name: 'Santa Siberyak' } }], REAL_CHECK), null);
   assert.equal(matchPendingReport([], REAL_CHECK), null);
+});
+
+test('памятка: шаблон принятой проверки в заполненном виде разбирается', () => {
+  const filled = ACCEPTED_TEMPLATE.replace('Ссылка на отчёт', LINK)
+    .replace('Упоминание человека', '<@766166436656709642>')
+    .replace('[Отдел]', '[Delta]')
+    .replace('[Ранг]', '[12]')
+    .replace('[Количество баллов]', '90');
+  const c = parseCheck(filled);
+  assert.equal(c.accepted, true);
+  assert.equal(c.userId, '766166436656709642');
+  assert.equal(c.points, 90);
+  assert.equal(c.minimum, 50);
+  assert.equal(c.rank, '12');
+  assert.equal(c.position, 'Delta');
+});
+
+test('памятка: шаблон отказа в заполненном виде разбирается', () => {
+  const filled = REJECTED_TEMPLATE.replace('Ссылка на отчёт', LINK)
+    .replace('Упоминание человека', '<@766166436656709642>')
+    .replace('[Отдел]', '[Delta]')
+    .replace('[Ранг]', '[12]')
+    .replace('Причина отказа', 'Нет скриншотов');
+  const c = parseCheck(filled);
+  assert.equal(c.accepted, false);
+  assert.equal(c.reason, 'Нет скриншотов');
+});
+
+test('памятка: сообщения влезают в лимит Discord', () => {
+  assert.ok(memoMessages().every((m) => m.length <= 2000));
 });
 
 test('формы: длинный список делится на сообщения', () => {
