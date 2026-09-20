@@ -4,6 +4,9 @@ import { bonusType, toGameNick } from './parsing.js';
 const LIMIT = 1900; // запас до лимита Discord в 2000 символов
 const UNKNOWN = '???';
 
+// В форме 3 ссылка пишется с экранированным слэшем («https:/\/»), это требование формы.
+const formLink3 = (link) => link.replace('https://', 'https:/\\/');
+
 export function entryPoints({ verdict, report }) {
   return verdict.points ?? report?.total ?? null;
 }
@@ -41,7 +44,7 @@ export function formRows(entries) {
         report ? toGameNick(report.name) : UNKNOWN,
         report?.rank ?? UNKNOWN,
         report?.position ?? UNKNOWN,
-        verdict.link,
+        formLink3(verdict.link),
         points ?? UNKNOWN,
         type ?? '—',
       ].join(' | '),
@@ -51,35 +54,49 @@ export function formRows(entries) {
   return { accepted, rejected, bonuses, warnings };
 }
 
-/** Делит строки на сообщения с заголовком и блоком кода, чтобы влезть в лимит Discord. */
-function blocks(title, columns, rows, prefix = '') {
-  if (rows.length === 0) return [];
-  const head = `${title}\n`;
+const CAPACITY = LIMIT - 8; // минус «```\n» и «\n```»
+
+const COLUMNS = {
+  accepted: '-# Упоминание | Имя Фамилия(В отчёте) | Ссылка на отчёт | Баллы',
+  rejected: '-# Упоминание | Имя Фамилия(В отчёте) | Ссылка на отчёт | Причина отказа',
+  bonuses: '-# Имя Фамилия | Ранг | Должность | Ссылка на отчёт | Баллы | Тип премии',
+};
+
+const code = (text) => `\`\`\`\n${text}\n\`\`\``;
+
+/** Раздел -> сообщения-блоки кода. Длинный список делится на несколько сообщений, заголовок повторяется. */
+function section(headerLines, rows) {
+  if (rows.length === 0) return [code([...headerLines, 'нету'].join('\n'))]; // пустой раздел не пропускаем
   const out = [];
+  const text = (rs) => [...headerLines, ...rs.map((r) => `- ${r}`)].join('\n');
   let cur = [];
-  const render = () => `${head}\`\`\`\n${prefix}${columns}\n${cur.join('\n')}\n\`\`\``;
   for (const row of rows) {
-    cur.push(row);
-    if (render().length > LIMIT && cur.length > 1) {
-      cur.pop();
-      out.push(render());
-      cur = [row];
+    if (cur.length && text([...cur, row]).length > CAPACITY) {
+      out.push(code(text(cur)));
+      cur = [];
     }
+    cur.push(row);
   }
-  out.push(render());
+  if (cur.length) out.push(code(text(cur)));
   return out;
 }
 
 /**
- * Три формы из проверок одного или нескольких проверяющих.
- * groups: [{ checkerId, entries }]. Формы 1 и 2 — отдельным блоком «Проверил: …» на каждого проверяющего,
- * форма 3 (премии) — одним общим списком.
+ * Формы для копирования, каждая часть — отдельное сообщение с блоком кода:
+ * «Проверил», принятые, отказанные, премии.
+ * groups: [{ checkerId, entries }]. На каждого проверяющего свои «Проверил», принятые и отказанные;
+ * премии — одним общим списком в конце. Предупреждения — отдельным обычным сообщением.
  */
 export function buildForms(groups) {
   const rows = groups.map(({ checkerId, entries }) => ({ checkerId, ...formRows(entries) }));
 
-  const perChecker = (title, columns, key) =>
-    rows.flatMap((r) => blocks(title, columns, r[key], `Проверил: <@${r.checkerId}>\n`));
+  const messages = [];
+  for (const r of rows) {
+    messages.push(code(`**Проверил:** <@${r.checkerId}>`));
+    messages.push(...section(['**:white_check_mark: Принятые отчёты:**', COLUMNS.accepted], r.accepted));
+    messages.push(...section(['**:x: Отказанные отчёты:**', COLUMNS.rejected], r.rejected));
+  }
+  messages.push(...section(['**Кто будет составлять премии**', COLUMNS.bonuses], rows.flatMap((r) => r.bonuses)));
 
   const warnings = rows.flatMap((r) => r.warnings);
   const seen = new Set();
@@ -89,24 +106,6 @@ export function buildForms(groups) {
       seen.add(messageId);
     }
   }
-
-  const messages = [
-    ...perChecker(
-      '**1. ✅ Принятые отчёты**',
-      'Упоминание | Имя Фамилия(В отчёте) | Ссылка на отчёт | Баллы',
-      'accepted',
-    ),
-    ...perChecker(
-      '**2. ❌ Отказанные отчёты**',
-      'Упоминание | Имя Фамилия(В отчёте) | Ссылка на отчёт | Причина отказа',
-      'rejected',
-    ),
-    ...blocks(
-      '**3. Кто будет составлять премии**',
-      'Имя Фамилия | Ранг | Должность | Ссылка на отчёт | Баллы | Тип премии',
-      rows.flatMap((r) => r.bonuses),
-    ),
-  ];
   if (warnings.length) messages.push(`⚠️ Проверьте вручную:\n${warnings.map((w) => `- ${w}`).join('\n')}`.slice(0, 2000));
   return messages;
 }

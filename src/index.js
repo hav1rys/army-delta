@@ -61,7 +61,8 @@ function isAllowed(userId, guildId, channelId) {
   return isUserAllowed(userId) && (guildId === null || (CHANNEL_ID !== '' && channelId === CHANNEL_ID));
 }
 
-const reply = (message, content) => message.reply({ content, allowedMentions: { ...noPings, repliedUser: false } });
+// Обычное сообщение в тот же чат, а не «ответ» на сообщение пользователя: без строки-цитаты сверху.
+const say = (message, content) => message.channel.send({ content, allowedMentions: noPings });
 
 // Слэш-команды. Каждая возвращает список сообщений для ответа.
 const COMMANDS = {
@@ -135,13 +136,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
       flags: MessageFlags.Ephemeral,
     });
   }
-  // В серверных каналах ответ видит только вызвавший; в личке с ботом это и так приватно.
-  const flags = interaction.inGuild() ? MessageFlags.Ephemeral : undefined;
+  // В личке с ботом и в канале CHANNEL_ID ответ обычный; в остальных серверных каналах его видит только вызвавший.
+  const publicHere = !interaction.inGuild() || interaction.channelId === CHANNEL_ID;
+  const flags = publicHere ? undefined : MessageFlags.Ephemeral;
   try {
     await interaction.deferReply({ flags });
     const [first, ...rest] = command.run(interaction.user.id);
     await interaction.editReply({ content: first, allowedMentions: noPings });
-    for (const content of rest) await interaction.followUp({ content, flags, allowedMentions: noPings });
+
+    // Остальные сообщения — обычными сообщениями друг за другом: follow-up'ы Discord показывает как ответы на предыдущее.
+    let channel = publicHere ? (interaction.channel ?? (await interaction.user.createDM().catch(() => null))) : null;
+    for (const content of rest) {
+      if (channel) {
+        try {
+          await channel.send({ content, allowedMentions: noPings });
+          continue;
+        } catch {
+          channel = null; // нет доступа к каналу — дальше follow-up'ами
+        }
+      }
+      await interaction.followUp({ content, flags, allowedMentions: noPings });
+    }
   } catch (err) {
     console.error(`Ошибка команды /${interaction.commandName}:`, err);
     const content = `Ошибка: ${err.message}`;
@@ -164,14 +179,16 @@ async function handleReport(message, report, { snapshot, text }) {
   const ref = snapshot
     ? { messageId: snapshot.id, link: messageLink(snapshot.guildId, snapshot.channelId, snapshot.id) }
     : findMessageLink(text);
-  if (!ref) return reply(message, 'Это похоже на отчёт, но нет ссылки на исходное сообщение. Перешлите отчёт (Forward), а не копируйте.');
+  if (!ref?.messageId || ref.messageId === 'undefined') {
+    return say(message, 'Это похоже на отчёт, но Discord не передал ссылку на исходное сообщение. Перешлите отчёт (Forward), а не копируйте.');
+  }
 
   const store = storeFor(message.author.id);
   store.setReport(ref.messageId, { ...report, link: ref.link });
   const who = `${report.name} (ранг ${report.rank ?? '?'}, ${report.position ?? '?'})`;
   const verdict = store.verdict(ref.messageId);
-  if (!verdict) return reply(message, `📄 Отчёт: ${who}, ${report.total ?? '?'} б. Жду проверку.`);
-  return reply(message, `🔗 ${describe(store.entry(ref.messageId))}`);
+  if (!verdict) return say(message, `📄 Отчёт: ${who}, ${report.total ?? '?'} б. Жду проверку.\nСсылка на отчёт: ${ref.link}`);
+  return say(message, `🔗 ${describe(store.entry(ref.messageId))}`);
 }
 
 async function handleCheck(message, check) {
@@ -185,8 +202,19 @@ async function handleCheck(message, check) {
     link: check.link,
   });
   const entry = store.entry(check.messageId);
-  if (!entry.report) return reply(message, `Проверка сохранена, но отчёта нет — перешлите отчёт: ${check.link}`);
-  return reply(message, describe(entry));
+  if (!entry.report) {
+    // Показываем обе ссылки, чтобы было видно, чем они отличаются.
+    const known = store.pendingReports().slice(-5).map(({ report }) => `- ${report.name}: ${report.link}`);
+    console.log(`Проверка без отчёта: id в ссылке ${check.messageId}; пересланные отчёты:`, known);
+    const lines = [
+      'Проверка сохранена, но отчёта с такой ссылкой нет.',
+      `Ссылка в проверке: ${check.link}`,
+      known.length ? `Пересланные отчёты:\n${known.join('\n')}` : 'Пересланных отчётов, ждущих проверки, нет.',
+      'Ссылки должны совпадать: перешлите нужный отчёт или отправьте проверку с правильной ссылкой.',
+    ];
+    return say(message, lines.join('\n'));
+  }
+  return say(message, describe(entry));
 }
 
 function describe({ verdict, report }) {
@@ -202,7 +230,7 @@ client.on(Events.MessageCreate, async (message) => {
     await onMessage(message);
   } catch (err) {
     console.error('Ошибка обработки сообщения:', err);
-    await reply(message, `Ошибка: ${err.message}`).catch(() => {});
+    await say(message, `Ошибка: ${err.message}`).catch(() => {});
   }
 });
 
@@ -219,9 +247,9 @@ async function onMessage(message) {
   if (problem?.problems.length) {
     const what = problem.kind === 'report' ? 'отчёт' : 'проверку';
     const list = problem.problems.map((p) => `- ${p}`).join('\n');
-    return reply(message, `Не могу принять ${what}, не хватает:\n${list}`);
+    return say(message, `Не могу принять ${what}, не хватает:\n${list}`);
   }
-  return reply(message, 'Не понял, что это. Жду пересланный отчёт или проверку (ссылка на отчёт, «id | ник ...», баллы или причина отказа). Команды: /отчет, /общий-отчет, /статус, /очистить.');
+  return say(message, 'Не понял, что это. Жду пересланный отчёт или проверку (ссылка на отчёт, «id | ник ...», баллы или причина отказа). Команды: /отчет, /общий-отчет, /статус, /очистить.');
 }
 
 process.on('unhandledRejection', (err) => console.error('Ошибка:', err));

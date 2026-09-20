@@ -4,6 +4,7 @@ import { buildForms, formRows } from '../src/forms.js';
 import { bonusType, diagnose, flattenEmbeds, parseCheck, parseReport } from '../src/parsing.js';
 
 const LINK = 'https://discord.com/channels/713076174108229712/1027944923829383188/1548582679338024982';
+const LINK3 = LINK.replace('https://', 'https:/\\/'); // в форме 3 слэш экранирован
 
 const ACCEPTED = `${LINK}
 621978844894593026 | @[Delta] Vladislav_Sideryak [12]
@@ -140,9 +141,41 @@ test('формы: принятый, отказанный и премия', () =>
   const rows = formRows(entries);
   assert.deepEqual(rows.accepted, [`<@621978844894593026> | Vladislav Siberyak | ${LINK} | 125`]);
   assert.match(rows.rejected[0], /^<@466633638511902752> \| Santa Siberyak \| .+ \| У тебя альбом пуст$/);
-  assert.deepEqual(rows.bonuses, [`Vladislav_Siberyak | 12 | Delta | ${LINK} | 125 | Высокая`]);
+  assert.deepEqual(rows.bonuses, [`Vladislav_Siberyak | 12 | Delta | ${LINK3} | 125 | Высокая`]);
   assert.deepEqual(rows.warnings, []);
   assert.ok(buildForms([{ checkerId: '1', entries }]).every((m) => m.length <= 2000));
+});
+
+test('формы: каждая часть — отдельное сообщение-блок для копирования', () => {
+  const report = { name: 'Vladislav Siberyak', rank: '12', position: 'Delta', total: 125 };
+  const parts = buildForms([{ checkerId: '9', entries: [{ messageId: '1', verdict: parseCheck(ACCEPTED), report }] }]);
+  const fence = (body) => '```\n' + body + '\n```';
+  assert.deepEqual(parts, [
+    fence('**Проверил:** <@9>'),
+    fence(
+      '**:white_check_mark: Принятые отчёты:**\n' +
+        '-# Упоминание | Имя Фамилия(В отчёте) | Ссылка на отчёт | Баллы\n' +
+        `- <@621978844894593026> | Vladislav Siberyak | ${LINK} | 125`,
+    ),
+    fence(
+      '**:x: Отказанные отчёты:**\n' +
+        '-# Упоминание | Имя Фамилия(В отчёте) | Ссылка на отчёт | Причина отказа\n' +
+        'нету',
+    ),
+    fence(
+      '**Кто будет составлять премии**\n' +
+        '-# Имя Фамилия | Ранг | Должность | Ссылка на отчёт | Баллы | Тип премии\n' +
+        `- Vladislav_Siberyak | 12 | Delta | ${LINK3} | 125 | Высокая`,
+    ),
+  ]);
+});
+
+test('формы: нет принятых и премий — пишется «нету»', () => {
+  const report = { name: 'Santa Siberyak', rank: '12', position: 'Delta', total: 55 };
+  const parts = buildForms([{ checkerId: '9', entries: [{ messageId: '2', verdict: parseCheck(REJECTED), report }] }]);
+  assert.equal(parts.length, 4);
+  assert.match(parts[1], /Принятые отчёты:\*\*\n-# .+\nнету/);
+  assert.match(parts[3], /Кто будет составлять премии\*\*\n-# .+\nнету/);
 });
 
 test('общий отчёт: блоки «Проверил» на каждого, премии одним списком, дубли отмечаются', () => {
@@ -154,9 +187,9 @@ test('общий отчёт: блоки «Проверил» на каждого
     { checkerId: '222', entries: [b, { ...a }] }, // отчёт «1» проверили оба
   ]);
   const text = parts.join('\n');
-  assert.match(text, /Проверил: <@111>/);
-  assert.match(text, /Проверил: <@222>/);
-  assert.equal(parts.filter((m) => m.includes('3. Кто будет составлять премии')).length, 1);
+  assert.match(text, /\*\*Проверил:\*\* <@111>/);
+  assert.match(text, /\*\*Проверил:\*\* <@222>/);
+  assert.equal(parts.filter((m) => m.includes('Кто будет составлять премии')).length, 1);
   assert.equal((text.match(/Vladislav|Name_Surname/g) ?? []).length, 2); // в форме 3 — обе принятые строки
   assert.match(text, /Отчёт проверили несколько человек/);
 });
