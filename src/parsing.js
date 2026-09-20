@@ -21,6 +21,14 @@ export function bonusType(points) {
 
 const stripMarkdown = (s) => s.replace(/[*`]/g, '').trim();
 
+/** Строка без разметки Discord: **жирный**, `код`, ~~зачёркнутый~~, -# мелкий шрифт, > цитата, __подчёркнутый__. */
+const plainLine = (l) =>
+  l
+    .replace(/[*`~]/g, '')
+    .replace(/^\s*(?:-#|>+|#+)\s*/, '')
+    .replace(/^\s*_+|_+\s*$/g, '')
+    .trim();
+
 /** Строка с ссылкой на сообщение Discord -> { guildId, channelId, messageId, link } */
 export function findMessageLink(text) {
   const m = LINK_RE.exec(text ?? '');
@@ -104,17 +112,27 @@ export function parseCheck(text) {
   const restLines = rest.split(/\r?\n/);
 
   const pointsLines = restLines
-    .map((l) => /^\s*(\d+)\s*балл\S*\s*$/i.exec(l))
+    .map((l) => /^(\d+)\s*балл\S*$/i.exec(plainLine(l)))
     .filter(Boolean)
     .map((m) => Number(m[1]));
   const hasChangeBlock = /Изменение\s+баллов/i.test(rest);
   const accepted = pointsLines.length > 0 || hasChangeBlock;
   const minimum = Number(/Минимум\s+(\d+)/i.exec(rest)?.[1]) || null;
 
+  const nick = parseNickTags(restLines[0] ?? '');
   if (accepted) {
-    return { ...link, userId, accepted: true, points: pointsLines.at(-1) ?? null, minimum, reason: null };
+    return { ...link, userId, ...nick, accepted: true, points: pointsLines.at(-1) ?? null, minimum, reason: null };
   }
-  return { ...link, userId, accepted: false, points: null, minimum: null, reason: extractReason(rest) };
+  return { ...link, userId, ...nick, accepted: false, points: null, minimum: null, reason: extractReason(rest) };
+}
+
+/** Ник «[Delta] Имя Фамилия [12]» -> { position: 'Delta', rank: '12' }: должность и ранг из скобок. */
+function parseNickTags(nickLine) {
+  const tags = [...nickLine.matchAll(/\[\s*([^\]]+?)\s*\]/g)].map((m) => m[1]);
+  return {
+    position: tags.find((t) => !/^\d+$/.test(t)) ?? null,
+    rank: tags.find((t) => /^\d+$/.test(t)) ?? null,
+  };
 }
 
 /** Убирает из хвоста строки с id ник вида «@[Delta] Имя Фамилия [12]» и оставляет причину. */
@@ -146,13 +164,26 @@ export function diagnose(text) {
   }
 
   const hasId = /(?:^|\n)[ \t]*\d{17,20}[ \t]*\|/.test(src) || /<@!?\d{17,20}>/.test(src);
-  const looksLikeCheck = hasId || /Изменение\s+баллов|Минимум\s+\d+|(?:^|\n)\s*\d+\s*балл/i.test(src);
+  const looksLikeCheck = hasId || lines.some((l) => /^Изменение\s+баллов|^Минимум\s+\d+|^\d+\s*балл/i.test(plainLine(l)));
   if (!looksLikeCheck) return null;
 
   const problems = [];
   if (!findMessageLink(src)) problems.push('нет ссылки на отчёт (первой строкой)');
   if (!hasId) problems.push('нет ID автора: нужна строка вида «766166436656709642 | ник»');
   return { kind: 'check', problems };
+}
+
+const normName = (s) => s.toLowerCase().replace(/[_\s]+/g, ' ').trim();
+
+/**
+ * Отчёт для проверки, чья ссылка не совпала ни с одним пересланным отчётом (id при пересылке бывает другим):
+ * среди ещё не проверенных берём того, чьё имя есть в тексте проверки (в нике), иначе единственного.
+ * pending: [{ messageId, report }] в порядке поступления.
+ */
+export function matchPendingReport(pending, text) {
+  const hay = normName(text ?? '');
+  const byName = pending.filter(({ report }) => hay.includes(normName(report.name)));
+  return byName.at(-1) ?? (pending.length === 1 ? pending[0] : null);
 }
 
 /** «Имя Фамилия» -> «Имя_Фамилия» (формат игрового ника для формы 3). */

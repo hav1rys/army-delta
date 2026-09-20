@@ -29,6 +29,13 @@ export class Store {
     this.save();
   }
 
+  /** Перекладывает отчёт под другой id (когда id при пересылке не совпал с id из ссылки в проверке). */
+  moveReport(fromId, toId) {
+    this.data.reports[toId] = this.data.reports[fromId];
+    delete this.data.reports[fromId];
+    this.save();
+  }
+
   entry(messageId) {
     const verdict = this.verdict(messageId);
     return verdict ? { messageId, verdict, report: this.report(messageId) } : null;

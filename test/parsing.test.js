@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildForms, formRows } from '../src/forms.js';
-import { bonusType, diagnose, flattenEmbeds, parseCheck, parseReport } from '../src/parsing.js';
+import { bonusType, diagnose, flattenEmbeds, matchPendingReport, parseCheck, parseReport } from '../src/parsing.js';
 
 const LINK = 'https://discord.com/channels/713076174108229712/1027944923829383188/1548582679338024982';
 const LINK3 = LINK.replace('https://', 'https:/\\/'); // в форме 3 слэш экранирован
@@ -192,6 +192,54 @@ test('общий отчёт: блоки «Проверил» на каждого
   assert.equal(parts.filter((m) => m.includes('Кто будет составлять премии')).length, 1);
   assert.equal((text.match(/Vladislav|Name_Surname/g) ?? []).length, 2); // в форме 3 — обе принятые строки
   assert.match(text, /Отчёт проверили несколько человек/);
+});
+
+// Проверка так, как её видит бот в реальном сообщении: упоминание, **жирный** текст, «-#» мелкий шрифт.
+const REAL_CHECK = `https://discord.com/channels/713076174108229712/1027944923829383188/1551154782306046055
+<@766166436656709642> | [Delta] Matvey_Siberyak [12]
+**Изменение баллов:**
+Нет
+-/+ Балов | Активности | Причина
+---------------------------------
+**90 баллов**
+-# Минимум 50 баллов`;
+
+test('проверка с жирным шрифтом: баллы, минимум, ранг и должность из ника', () => {
+  const c = parseCheck(REAL_CHECK);
+  assert.equal(c.accepted, true);
+  assert.equal(c.userId, '766166436656709642');
+  assert.equal(c.points, 90);
+  assert.equal(c.minimum, 50);
+  assert.equal(c.rank, '12');
+  assert.equal(c.position, 'Delta');
+});
+
+test('ник: разные написания тега и ранга', () => {
+  const nick = (line) => {
+    const c = parseCheck(`${LINK}\n466633638511902752 | ${line} Причина`);
+    return [c.position, c.rank];
+  };
+  assert.deepEqual(nick('@[Delta] Santa Siberyak [12]'), ['Delta', '12']);
+  assert.deepEqual(nick('@[Delta]Webfox Siberyakov[12]'), ['Delta', '12']);
+  assert.deepEqual(nick('@[I.Delta]Jaba Siberyak [12]'), ['I.Delta', '12']);
+  assert.deepEqual(nick('@Dane4ka'), [null, null]);
+});
+
+test('формы: ранг и должность берутся из отчёта, ник из проверки — только если отчёта нет', () => {
+  const report = { name: 'Matvey Siberyak', rank: '11', position: 'Alpha', total: 90 };
+  const fromReport = formRows([{ messageId: '1', verdict: parseCheck(REAL_CHECK), report }]);
+  assert.match(fromReport.bonuses[0], /^Matvey_Siberyak \| 11 \| Alpha \| /);
+  const noReport = formRows([{ messageId: '1', verdict: parseCheck(REAL_CHECK), report: null }]);
+  assert.match(noReport.bonuses[0], /^\?\?\? \| 12 \| Delta \| /);
+});
+
+test('привязка отчёта: по имени в нике, иначе единственный ожидающий', () => {
+  const a = { messageId: 'a', report: { name: 'Li Il' } };
+  const b = { messageId: 'b', report: { name: 'Matvey_Siberyak' } };
+  assert.equal(matchPendingReport([a, b], REAL_CHECK).messageId, 'b');
+  assert.equal(matchPendingReport([a], REAL_CHECK).messageId, 'a'); // единственный, имени в нике нет
+  assert.equal(matchPendingReport([a, { messageId: 'c', report: { name: 'Santa Siberyak' } }], REAL_CHECK), null);
+  assert.equal(matchPendingReport([], REAL_CHECK), null);
 });
 
 test('формы: длинный список делится на сообщения', () => {

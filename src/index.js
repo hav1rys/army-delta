@@ -11,7 +11,16 @@ import {
   Partials,
 } from 'discord.js';
 import { buildForms, entryPoints } from './forms.js';
-import { bonusType, diagnose, findMessageLink, flattenEmbeds, messageLink, parseCheck, parseReport } from './parsing.js';
+import {
+  bonusType,
+  diagnose,
+  findMessageLink,
+  flattenEmbeds,
+  matchPendingReport,
+  messageLink,
+  parseCheck,
+  parseReport,
+} from './parsing.js';
 import { Store } from './store.js';
 
 const {
@@ -187,14 +196,27 @@ async function handleReport(message, report, { snapshot, text }) {
   store.setReport(ref.messageId, { ...report, link: ref.link });
   const who = `${report.name} (ранг ${report.rank ?? '?'}, ${report.position ?? '?'})`;
   const verdict = store.verdict(ref.messageId);
-  if (!verdict) return say(message, `📄 Отчёт: ${who}, ${report.total ?? '?'} б. Жду проверку.\nСсылка на отчёт: ${ref.link}`);
+  if (!verdict) return say(message, `📄 Отчёт: ${who}, ${report.total ?? '?'} б. Жду проверку.`);
   return say(message, `🔗 ${describe(store.entry(ref.messageId))}`);
 }
 
-async function handleCheck(message, check) {
+async function handleCheck(message, check, text) {
   const store = storeFor(message.author.id);
+
+  // Ссылка в формах берётся из проверки. Но id пересланного отчёта не всегда совпадает с id из этой ссылки,
+  // тогда отчёт ищем среди ещё не проверенных: по имени в нике, иначе единственный.
+  if (!store.report(check.messageId)) {
+    const match = matchPendingReport(store.pendingReports(), text);
+    if (match) {
+      console.log(`Отчёт привязан к проверке без совпадения id: ${match.messageId} → ${check.messageId}`);
+      store.moveReport(match.messageId, check.messageId);
+    }
+  }
+
   store.setVerdict(check.messageId, {
     userId: check.userId,
+    rank: check.rank,
+    position: check.position,
     accepted: check.accepted,
     points: check.points,
     minimum: check.minimum,
@@ -203,16 +225,11 @@ async function handleCheck(message, check) {
   });
   const entry = store.entry(check.messageId);
   if (!entry.report) {
-    // Показываем обе ссылки, чтобы было видно, чем они отличаются.
-    const known = store.pendingReports().slice(-5).map(({ report }) => `- ${report.name}: ${report.link}`);
-    console.log(`Проверка без отчёта: id в ссылке ${check.messageId}; пересланные отчёты:`, known);
-    const lines = [
-      'Проверка сохранена, но отчёта с такой ссылкой нет.',
-      `Ссылка в проверке: ${check.link}`,
-      known.length ? `Пересланные отчёты:\n${known.join('\n')}` : 'Пересланных отчётов, ждущих проверки, нет.',
-      'Ссылки должны совпадать: перешлите нужный отчёт или отправьте проверку с правильной ссылкой.',
-    ];
-    return say(message, lines.join('\n'));
+    const waiting = store.pendingReports().map(({ report }) => report.name);
+    const hint = waiting.length
+      ? `Ждут проверки: ${waiting.join(', ')}, но в проверке нет имени, чтобы выбрать нужный. Отправьте проверку сразу после его отчёта.`
+      : 'Сначала перешлите отчёт, потом отправьте проверку.';
+    return say(message, `Проверка сохранена, но отчёта для неё нет. ${hint}`);
   }
   return say(message, describe(entry));
 }
@@ -240,7 +257,7 @@ async function onMessage(message) {
   if (report) return handleReport(message, report, payload);
 
   const check = parseCheck(payload.text);
-  if (check) return handleCheck(message, check);
+  if (check) return handleCheck(message, check, payload.text);
 
   console.log('Не распознано сообщение:', JSON.stringify(payload.text).slice(0, 500));
   const problem = diagnose(payload.text);

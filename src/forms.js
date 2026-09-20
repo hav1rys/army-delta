@@ -42,8 +42,8 @@ export function formRows(entries) {
     bonuses.push(
       [
         report ? toGameNick(report.name) : UNKNOWN,
-        report?.rank ?? UNKNOWN,
-        report?.position ?? UNKNOWN,
+        report?.rank ?? verdict.rank ?? UNKNOWN, // ранг и должность — из отчёта («Подполковник (12)», «отчёт Delta»)
+        report?.position ?? verdict.position ?? UNKNOWN, // ник из проверки — только если отчёта нет
         formLink3(verdict.link),
         points ?? UNKNOWN,
         type ?? '—',
