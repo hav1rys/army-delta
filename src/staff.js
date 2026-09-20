@@ -116,7 +116,9 @@ export class Staff {
 
   canAssign(actorId, roleKey, targetId) {
     const role = roleByKey(roleKey);
-    if (!role || role.rank >= this.rankOf(actorId)) return false;
+    if (!role) return false;
+    if (this.isOwner(actorId)) return true; // владелец ставит кого угодно, в том числе себя (запись в списке, права те же)
+    if (role.rank >= this.rankOf(actorId)) return false;
     const current = this.rankOf(targetId);
     return current === 0 || current < this.rankOf(actorId);
   }

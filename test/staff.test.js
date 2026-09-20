@@ -289,3 +289,20 @@ test('ранг словами для сообщений об отказе', () =
   assert.equal(staff.describeRank('3'), '[3] Начальник отдела');
   assert.equal(staff.describeRank('999'), 'нет в списке');
 });
+
+test('владелец может добавить в список и себя; остальные себя — нет', () => {
+  const staff = tempStaff();
+  assert.equal(staff.canAssign(OWNER, 'general', OWNER), true);
+  assert.equal(staff.add('general', OWNER, 'Имя Фамилия'), 'added');
+
+  // запись в списке ничего не меняет в правах: владелец по-прежнему выше всех
+  assert.equal(staff.rankOf(OWNER), Infinity);
+  assert.equal(staff.describeRank(OWNER), 'владелец');
+  assert.equal(staff.canAssign(OWNER, 'instructor', '5'), true);
+  assert.equal(staff.canEdit(OWNER, OWNER), true); // имя себе поменять и убрать себя из списка можно
+
+  staff.add('curator', '3');
+  assert.equal(staff.canAssign('3', 'instructor', '3'), false); // сам себя перевести нельзя
+  assert.equal(staff.canAssign('3', 'curator', '3'), false);
+  assert.equal(staff.canAssign('3', 'general', '5'), false); // и поставить выше себя тоже
+});
