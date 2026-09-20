@@ -64,39 +64,42 @@ const COLUMNS = {
 
 const code = (text) => `\`\`\`\n${text}\n\`\`\``;
 
-/** Раздел -> сообщения-блоки кода. Длинный список делится на несколько сообщений, заголовок повторяется. */
-function section(headerLines, rows) {
-  if (rows.length === 0) return [code([...headerLines, 'нету'].join('\n'))]; // пустой раздел не пропускаем
+/**
+ * Раздел -> сообщения (каждое в обёртке wrap). Длинный список делится на несколько сообщений,
+ * заголовок повторяется; пустой раздел не пропускается, вместо строк пишется «нету».
+ */
+function section(headerLines, rows, wrap) {
+  if (rows.length === 0) return [wrap([...headerLines, 'нету'].join('\n'))];
   const out = [];
   const text = (rs) => [...headerLines, ...rs.map((r) => `- ${r}`)].join('\n');
   let cur = [];
   for (const row of rows) {
     if (cur.length && text([...cur, row]).length > CAPACITY) {
-      out.push(code(text(cur)));
+      out.push(wrap(text(cur)));
       cur = [];
     }
     cur.push(row);
   }
-  if (cur.length) out.push(code(text(cur)));
+  if (cur.length) out.push(wrap(text(cur)));
   return out;
 }
 
 /**
- * Формы для копирования, каждая часть — отдельное сообщение с блоком кода:
- * «Проверил», принятые, отказанные, премии.
- * groups: [{ checkerId, entries }]. На каждого проверяющего свои «Проверил», принятые и отказанные;
+ * Формы: «Проверил», принятые, отказанные, премии — каждая часть отдельным сообщением.
+ * groups: [{ checkerId, entries }]. На каждого проверяющего свои «Проверил», принятые и отказанные подряд;
  * премии — одним общим списком в конце. Предупреждения — отдельным обычным сообщением.
+ * wrap: как оформить сообщение; по умолчанию блок кода для копирования, (t) => t даёт обычный текст.
  */
-export function buildForms(groups) {
+export function buildForms(groups, wrap = code) {
   const rows = groups.map(({ checkerId, entries }) => ({ checkerId, ...formRows(entries) }));
 
   const messages = [];
   for (const r of rows) {
-    messages.push(code(`**Проверил:** <@${r.checkerId}>`));
-    messages.push(...section(['**:white_check_mark: Принятые отчёты:**', COLUMNS.accepted], r.accepted));
-    messages.push(...section(['**:x: Отказанные отчёты:**', COLUMNS.rejected], r.rejected));
+    messages.push(wrap(`**Проверил:** <@${r.checkerId}>`));
+    messages.push(...section(['**:white_check_mark: Принятые отчёты:**', COLUMNS.accepted], r.accepted, wrap));
+    messages.push(...section(['**:x: Отказанные отчёты:**', COLUMNS.rejected], r.rejected, wrap));
   }
-  messages.push(...section(['**Кто будет составлять премии**', COLUMNS.bonuses], rows.flatMap((r) => r.bonuses)));
+  messages.push(...section(['**Кто будет составлять премии**', COLUMNS.bonuses], rows.flatMap((r) => r.bonuses), wrap));
 
   const warnings = rows.flatMap((r) => r.warnings);
   const seen = new Set();

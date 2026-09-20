@@ -36,6 +36,15 @@ export class Store {
     this.save();
   }
 
+  /** Удаляет отчёт и проверку по id сообщения; true, если что-то было. */
+  remove(messageId) {
+    const existed = messageId in this.data.reports || messageId in this.data.verdicts;
+    delete this.data.reports[messageId];
+    delete this.data.verdicts[messageId];
+    if (existed) this.save();
+    return existed;
+  }
+
   entry(messageId) {
     const verdict = this.verdict(messageId);
     return verdict ? { messageId, verdict, report: this.report(messageId) } : null;
