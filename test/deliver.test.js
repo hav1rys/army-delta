@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { MessageFlags } from 'discord.js';
-import { deliver, say } from '../src/deliver.js';
+import { deliver, fail, say, sayError } from '../src/deliver.js';
 
 /** Подделка слэш-команды: записывает, что и куда отправлено. dmOpen — можно ли написать пользователю в личку. */
 function fakeInteraction({ inGuild, dmOpen = true }) {
@@ -55,15 +55,69 @@ test('команда на сервере при закрытой личке: п�
   assert.equal(i.calls.deleteReply, 0);
 });
 
-test('команда в личке с ботом: первое — ответ на команду, остальные обычными сообщениями', async () => {
+test('команда в личке с ботом: всё самостоятельными сообщениями, не ответом на команду', async () => {
   const i = fakeInteraction({ inGuild: false });
   await deliver(i, ['первое', 'второе', 'третье']);
 
-  assert.equal(i.calls.editReply.length, 1);
-  assert.equal(i.calls.editReply[0].content, 'первое');
-  assert.deepEqual(i.calls.channel.map((p) => p.content), ['второе', 'третье']); // не follow-up'ы-ответы
-  assert.deepEqual(i.calls.followUp, []);
+  assert.deepEqual(i.calls.dm.map((p) => p.content), ['первое', 'второе', 'третье']); // все три — обычные сообщения
+  assert.deepEqual(i.calls.editReply, []); // на саму команду ничего не отвечено
+  assert.deepEqual(i.calls.followUp, []); // и цепочки ответов нет
+  assert.deepEqual(i.calls.channel, []);
+  assert.equal(i.calls.deleteReply, 1); // скрытое подтверждение команды убрано, строки «использует /…» не остаётся
+});
+
+test('команда в личке при сбое отправки: показано на месте, только вызвавшему', async () => {
+  const i = fakeInteraction({ inGuild: false, dmOpen: false });
+  await deliver(i, ['первое']);
+  assert.deepEqual(i.calls.dm, []);
+  assert.equal(i.calls.followUp.length, 1);
+  assert.equal(i.calls.followUp[0].flags, MessageFlags.Ephemeral);
   assert.equal(i.calls.deleteReply, 0);
+});
+
+test('ошибка приходит ответом на команду, остальное обычными сообщениями в личку', async () => {
+  for (const inGuild of [true, false]) {
+    const i = fakeInteraction({ inGuild });
+    await deliver(i, ['формы', fail('Нет доступа: …'), 'ещё']);
+
+    assert.deepEqual(i.calls.dm.map((p) => p.content), ['формы', 'ещё']); // обычные — в личку, без ошибки
+    assert.equal(i.calls.editReply.length, 1); // ошибка — ответом на команду
+    assert.equal(i.calls.editReply[0].content, 'Нет доступа: …');
+    assert.equal(i.calls.deleteReply, 0); // ответ не удаляется, он и есть ошибка
+    assert.deepEqual(i.calls.followUp, []);
+  }
+});
+
+test('только ошибка: в личку ничего не идёт, ответ на команду — эта ошибка', async () => {
+  const i = fakeInteraction({ inGuild: false });
+  await deliver(i, [fail('Не похоже на ID')]);
+  assert.deepEqual(i.calls.dm, []);
+  assert.equal(i.calls.editReply[0].content, 'Не похоже на ID');
+  assert.equal(i.calls.deleteReply, 0);
+});
+
+test('несколько ошибок: первая ответом на команду, остальные скрытыми дополнениями', async () => {
+  const i = fakeInteraction({ inGuild: true });
+  await deliver(i, [fail('первая'), fail('вторая')]);
+  assert.equal(i.calls.editReply[0].content, 'первая');
+  assert.equal(i.calls.followUp.length, 1);
+  assert.equal(i.calls.followUp[0].content, 'вторая');
+  assert.equal(i.calls.followUp[0].flags, MessageFlags.Ephemeral);
+});
+
+test('без ошибок ответа на команду нет: подтверждение удалено', async () => {
+  const i = fakeInteraction({ inGuild: true });
+  await deliver(i, ['только формы']);
+  assert.deepEqual(i.calls.editReply, []);
+  assert.equal(i.calls.deleteReply, 1);
+});
+
+test('личка закрыта: и обычные сообщения, и ошибки показаны на месте, только вам', async () => {
+  const i = fakeInteraction({ inGuild: true, dmOpen: false });
+  await deliver(i, ['формы', fail('ошибка')]);
+  assert.deepEqual(i.calls.dm, []);
+  assert.deepEqual(i.calls.followUp.map((p) => p.content), ['формы', 'ошибка']);
+  assert.ok(i.calls.followUp.every((p) => p.flags === MessageFlags.Ephemeral));
 });
 
 /** Подделка сообщения, написанного боту: в личке (guildId null) или в канале сервера. */
@@ -105,4 +159,30 @@ test('ответ на сообщение из канала при закрыто
   assert.equal(m.calls.reply.length, 1);
   assert.match(m.calls.reply[0].content, /личные сообщения/);
   assert.doesNotMatch(m.calls.reply[0].content, /Li Il|185/); // данные в канал не попали
+});
+
+test('ошибка при обработке сообщения в личке: ответом на само сообщение', async () => {
+  const m = fakeMessage({ guildId: null });
+  await sayError(m, 'Не нашёл отчёт');
+  assert.equal(m.calls.reply.length, 1);
+  assert.equal(m.calls.reply[0].content, 'Не нашёл отчёт');
+  assert.equal(m.calls.reply[0].allowedMentions.repliedUser, false); // без пинга
+  assert.deepEqual(m.calls.channel, []);
+});
+
+test('ошибка при обработке сообщения из канала сервера: только в личку, в канале ничего', async () => {
+  const m = fakeMessage({ guildId: '713076174108229712' });
+  await sayError(m, 'Не нашёл отчёт');
+  assert.deepEqual(m.calls.dm.map((p) => p.content), ['Не нашёл отчёт']);
+  assert.deepEqual(m.calls.reply, []);
+  assert.deepEqual(m.calls.channel, []);
+});
+
+test('ошибка при обработке сообщения: если исходное удалено, придёт обычным сообщением', async () => {
+  const m = fakeMessage({ guildId: null });
+  m.reply = async () => {
+    throw new Error('Unknown Message');
+  };
+  await sayError(m, 'Не нашёл отчёт');
+  assert.deepEqual(m.calls.channel.map((p) => p.content), ['Не нашёл отчёт']);
 });

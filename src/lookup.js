@@ -70,7 +70,7 @@ function describeMatch(query, { checkerId, entry, pending }) {
 /** Ответ на запрос: строка на каждый найденный отчёт, «нет отчёта» для остальных и итог. Возвращает сообщения. */
 export function lookupMessages(stores, text) {
   const all = parseQueries(text);
-  if (!all.length) return ['Ничего не распознал: укажите имена и фамилии или Discord ID через запятую.'];
+  if (!all.length) return [{ error: 'Ничего не распознал: укажите имена и фамилии или Discord ID через запятую.' }]; // ошибка, а не результат
   const queries = all.slice(0, MAX_QUERIES);
 
   const lines = [];

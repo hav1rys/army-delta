@@ -11,7 +11,7 @@ import {
   MessageFlags,
   Partials,
 } from 'discord.js';
-import { buildForms, entryPoints } from './forms.js';
+import { COPY_HINT, buildForms, entryPoints } from './forms.js';
 import {
   bonusType,
   diagnose,
@@ -35,8 +35,8 @@ import {
 import { ActingFor } from './acting.js';
 import { BUILD } from './build.js';
 import { PendingChecks, applyEdits, confirmMessage, editModal, isConfirmId, parseConfirmId, parseEditFields } from './confirm.js';
-import { deliver, say } from './deliver.js';
-import { leadershipMessage, memoMessages, unregisteredMessage } from './memo.js';
+import { deliver, fail, say, sayError } from './deliver.js';
+import { leadershipMessage, memoMessages, supportMessage, unregisteredMessage } from './memo.js';
 import {
   STAFF_BUTTONS,
   STAFF_ROLES,
@@ -56,6 +56,7 @@ const {
   DISCORD_TOKEN,
   ALLOWED_USER_IDS = '',
   OWNER_USER_ID = '',
+  SUPPORT_CONTACT = '',
   CHANNEL_ID = '',
   DATA_DIR = './data',
 } = process.env;
@@ -146,18 +147,31 @@ function targetStore(userId, i) {
   return { store: storeFor(id) };
 }
 
-/** Удаляет отчёт по ссылке: свои и тех, кто ниже вас по рангу. Возвращает текст ответа. */
-function removeReportFor(actorId, link) {
+/** Удаляет отчёт по ссылке: свои и тех, кто ниже вас по рангу. Возвращает { done, problems }: что удалено и что не вышло. */
+function removeReport(actorId, link) {
   const result = removeByLinkAllowed(everyStore(), link, (checkerId) => checkerId === actorId || staff.outranks(actorId, checkerId));
-  if (result.error) return result.error;
-  const lines = [];
-  if (result.removed.length) {
-    lines.push(`Удалено: ${result.removed.map(({ checkerId, name }) => `${name ?? 'без имени'} (проверил <@${checkerId}>)`).join(', ')}`);
-  }
+  if (result.error) return { done: null, problems: [result.error] };
+  const problems = [];
   if (result.denied.length) {
-    lines.push(`Нельзя удалить: отчёт у ${result.denied.map((id) => `<@${id}>`).join(', ')}, он не ниже вас по рангу.`);
+    problems.push(`Нельзя удалить: отчёт у ${result.denied.map((id) => `<@${id}>`).join(', ')}, он не ниже вас по рангу.`);
   }
-  return lines.length ? lines.join('\n') : 'Такого отчёта не найдено.';
+  if (!result.removed.length && !result.denied.length) problems.push('Такого отчёта не найдено.');
+  const done = result.removed.length
+    ? `Удалено: ${result.removed.map(({ checkerId, name }) => `${name ?? 'без имени'} (проверил <@${checkerId}>)`).join(', ')}`
+    : null;
+  return { done, problems };
+}
+
+/** Для окна панели: один текст. */
+const removeReportFor = (actorId, link) => {
+  const { done, problems } = removeReport(actorId, link);
+  return [done, ...problems].filter(Boolean).join('\n');
+};
+
+/** Для команды: удалённое обычным сообщением, ошибки — ответом на команду. */
+function removeReportMessages(actorId, link) {
+  const { done, problems } = removeReport(actorId, link);
+  return [...(done ? [done] : []), ...problems.map(fail)];
 }
 
 const managersOnly = (text) => `Нет доступа: ${text} для тех, кто выше инструктора по рангу.`;
@@ -178,7 +192,7 @@ const COMMANDS = {
     ],
     run(userId, i) {
       const target = targetStore(userId, i);
-      if (target.error) return [target.error];
+      if (target.error) return [fail(target.error)];
       const result = addAccepted(
         target.store,
         {
@@ -191,7 +205,7 @@ const COMMANDS = {
         },
         everyStore(),
       );
-      return [result.error ?? `Добавлено: ${describe(result.entry)}`];
+      return [result.error ? fail(result.error) : `Добавлено: ${describe(result.entry)}`];
     },
   },
 
@@ -206,7 +220,7 @@ const COMMANDS = {
     ],
     run(userId, i) {
       const target = targetStore(userId, i);
-      if (target.error) return [target.error];
+      if (target.error) return [fail(target.error)];
       const result = addRejected(
         target.store,
         {
@@ -217,40 +231,39 @@ const COMMANDS = {
         },
         everyStore(),
       );
-      return [result.error ?? `Добавлено: ${describe(result.entry)}`];
+      return [result.error ? fail(result.error) : `Добавлено: ${describe(result.entry)}`];
     },
   },
 
   'удалить-отчет': {
     description: 'Удалить отчёт (принятый или отказанный) по ссылке',
     options: [textOption('ссылка', 'Ссылка на отчёт')],
-    run: (userId, i) => [removeReportFor(userId, i.options.getString('ссылка', true))],
+    run: (userId, i) => removeReportMessages(userId, i.options.getString('ссылка', true)),
   },
 
   'отчет': {
     description: 'Три формы по отчётам, которые проверили вы',
     run(userId) {
       const entries = storeFor(userId).entries();
-      return entries.length ? buildForms([{ checkerId: userId, entries }]) : ['Пока нет ни одной проверки.'];
+      return entries.length ? [...buildForms([{ checkerId: userId, entries }]), COPY_HINT] : ['Пока нет ни одной проверки.'];
     },
   },
 
   'общий-отчет': {
     description: 'Отчёты всех проверяющих (для руководства)',
     run(userId) {
-      if (!isManager(userId)) return [managersOnly('общий отчёт доступен')];
+      if (!isManager(userId)) return [fail(managersOnly('общий отчёт доступен'))];
       const groups = allCheckerIds()
         .map((checkerId) => ({ checkerId, entries: storeFor(checkerId).entries() }))
         .filter((g) => g.entries.length);
-      // Обычным текстом, а не блоками кода: упоминания видны именами, читать удобнее.
-      return groups.length ? buildForms(groups, (text) => text) : ['Пока нет ни одной проверки.'];
+      return groups.length ? [...buildForms(groups), COPY_HINT] : ['Пока нет ни одной проверки.'];
     },
   },
 
   'статистика': {
     description: 'Кто из проверяющих сколько отчётов сделал (для руководства)',
     run(userId) {
-      if (!isManager(userId)) return [managersOnly('статистика доступна')];
+      if (!isManager(userId)) return [fail(managersOnly('статистика доступна'))];
       const ids = [...new Set([...allCheckerIds(), ...staff.everyone()])];
       const rows = ids.map((checkerId) => {
         const entries = storeFor(checkerId).entries();
@@ -266,9 +279,11 @@ const COMMANDS = {
     run(userId) {
       if (!staff.assignableRoles(userId).length) {
         return [
-          OWNER_USER_ID
-            ? `Нет доступа: команда для тех, у кого есть кто-то ниже по рангу. Ваш ранг: ${staff.describeRank(userId)}.${notOwnerHint(userId)}`
-            : 'Не задана переменная OWNER_USER_ID.',
+          fail(
+            OWNER_USER_ID
+              ? `Нет доступа: команда для тех, у кого есть кто-то ниже по рангу. Ваш ранг: ${staff.describeRank(userId)}.${notOwnerHint(userId)}`
+              : 'Не задана переменная OWNER_USER_ID.',
+          ),
         ];
       }
       return [panelMessage(staff, userId)];
@@ -279,13 +294,14 @@ const COMMANDS = {
     description: 'Как пользоваться ботом (зависит от вашего уровня)',
     open: true, // отвечает и тем, кого нет в системе
     run(userId) {
-      if (!isUserAllowed(userId)) return [unregisteredMessage(userId)];
+      if (!isUserAllowed(userId)) return [fail(unregisteredMessage(userId)), supportMessage(SUPPORT_CONTACT)];
       const messages = memoMessages(client.user?.username);
       const addable = staff.assignableRoles(userId).map(roleTitle);
       if (addable.length) {
         const level = isOwner(userId) ? 'Владелец' : staff.rolesOf(userId) || 'Ваш ранг';
         messages.push(leadershipMessage({ level, addable, canReports: isManager(userId) }));
       }
+      messages.push(supportMessage(SUPPORT_CONTACT));
       return messages;
     },
   },
@@ -437,13 +453,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
   const command = COMMANDS[interaction.commandName];
   if (!command) return;
   try {
-    await interaction.deferReply({ flags: interaction.inGuild() ? MessageFlags.Ephemeral : undefined });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral }); // подтверждение команды скрытое; оно удаляется после отправки в личку
     const notRegistered = !command.open && !isUserAllowed(interaction.user.id);
-    const messages = notRegistered ? [unregisteredMessage(interaction.user.id)] : command.run(interaction.user.id, interaction);
+    const messages = notRegistered ? [fail(unregisteredMessage(interaction.user.id))] : command.run(interaction.user.id, interaction);
     await deliver(interaction, messages);
   } catch (err) {
     console.error(`Ошибка команды /${interaction.commandName}:`, err);
-    if (interaction.deferred) await deliver(interaction, [`Ошибка: ${err.message}`]).catch(() => {});
+    if (interaction.deferred) await deliver(interaction, [fail(`Ошибка: ${err.message}`)]).catch(() => {});
     else await interaction.reply({ content: `Ошибка: ${err.message}`, flags: MessageFlags.Ephemeral }).catch(() => {});
   }
 });
@@ -464,7 +480,7 @@ async function handleReport(message, report, { snapshot, text }) {
     ? { messageId: snapshot.id, link: messageLink(snapshot.guildId, snapshot.channelId, snapshot.id) }
     : findMessageLink(text);
   if (!ref?.messageId || ref.messageId === 'undefined') {
-    return say(message, 'Это похоже на отчёт, но Discord не передал ссылку на исходное сообщение. Перешлите отчёт (Forward), а не копируйте.');
+    return sayError(message, 'Это похоже на отчёт, но Discord не передал ссылку на исходное сообщение. Перешлите отчёт (Forward), а не копируйте.');
   }
 
   const { store, prefix } = workingStore(message.author.id);
@@ -499,7 +515,7 @@ async function handleCheck(message, check, text) {
 
   // Одна ссылка — один отчёт (у человека отчётов может быть сколько угодно).
   const dup = findDuplicate(everyStore(), check.messageId);
-  if (dup) return say(message, `${prefix}${duplicateMessage(dup)}`);
+  if (dup) return sayError(message, `${prefix}${duplicateMessage(dup)}`);
 
   // Ссылка в формах берётся из проверки. Но id пересланного отчёта не всегда совпадает с id из этой ссылки,
   // тогда отчёт ищем среди ещё не проверенных: по имени в нике, иначе единственный.
@@ -511,7 +527,7 @@ async function handleCheck(message, check, text) {
     const hint = waiting.length
       ? `Ждут проверки: ${waiting.join(', ')}, но в проверке нет имени, чтобы выбрать нужный. Отправьте проверку сразу после его отчёта.`
       : 'Сначала перешлите отчёт, потом отправьте проверку.';
-    return say(message, `${prefix}Не нашёл отчёт для этой проверки, ничего не сохранил. ${hint}`);
+    return sayError(message, `${prefix}Не нашёл отчёт для этой проверки, ничего не сохранил. ${hint}`);
   }
 
   const token = pendingChecks.add(actorId, { ownerId, reportId, check, report: store.report(reportId) });
@@ -603,7 +619,7 @@ client.on(Events.MessageCreate, async (message) => {
     await onMessage(message);
   } catch (err) {
     console.error('Ошибка обработки сообщения:', err);
-    await say(message, `Ошибка: ${err.message}`).catch(() => {});
+    await sayError(message, `Ошибка: ${err.message}`).catch(() => {});
   }
 });
 
@@ -620,9 +636,9 @@ async function onMessage(message) {
   if (problem?.problems.length) {
     const what = problem.kind === 'report' ? 'отчёт' : 'проверку';
     const list = problem.problems.map((p) => `- ${p}`).join('\n');
-    return say(message, `Не могу принять ${what}, не хватает:\n${list}`);
+    return sayError(message, `Не могу принять ${what}, не хватает:\n${list}`);
   }
-  return say(message, 'Не понял, что это. Жду пересланный отчёт или проверку (ссылка на отчёт, «id | ник ...», баллы или причина отказа). Команды: /памятка, /отчет, /общий-отчет, /статус, /очистить.');
+  return sayError(message, 'Не понял, что это. Жду пересланный отчёт или проверку (ссылка на отчёт, «id | ник ...», баллы или причина отказа). Команды: /памятка, /отчет, /общий-отчет, /статус, /очистить.');
 }
 
 process.on('unhandledRejection', (err) => console.error('Ошибка:', err));

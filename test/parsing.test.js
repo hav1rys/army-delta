@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildForms, formRows } from '../src/forms.js';
+import { COPY_HINT, buildForms, formRows } from '../src/forms.js';
 import { ACCEPTED_TEMPLATE, REJECTED_TEMPLATE, memoMessages } from '../src/memo.js';
 import { bonusType, diagnose, flattenEmbeds, matchPendingReport, parseCheck, parseReport } from '../src/parsing.js';
 
@@ -147,36 +147,120 @@ test('формы: принятый, отказанный и премия', () =>
   assert.ok(buildForms([{ checkerId: '1', entries }]).every((m) => m.length <= 2000));
 });
 
-test('формы: каждая часть — отдельное сообщение-блок для копирования', () => {
+test('формы: всё помещается — приходит одно сообщение обычным текстом', () => {
   const report = { name: 'Vladislav Siberyak', rank: '12', position: 'Delta', total: 125 };
   const parts = buildForms([{ checkerId: '9', entries: [{ messageId: '1', verdict: parseCheck(ACCEPTED), report }] }]);
-  const fence = (body) => '```\n' + body + '\n```';
   assert.deepEqual(parts, [
-    fence('**Проверил:** <@9>'),
-    fence(
+    '**Проверил:** <@9>\n\n' +
       '**:white_check_mark: Принятые отчёты:**\n' +
-        '-# Упоминание | Имя Фамилия(В отчёте) | Ссылка на отчёт | Баллы\n' +
-        `- <@621978844894593026> | Vladislav Siberyak | ${LINK} | 125`,
-    ),
-    fence(
+      '-# Упоминание | Имя Фамилия(В отчёте) | Ссылка на отчёт | Баллы\n' +
+      `- <@621978844894593026> | Vladislav Siberyak | ${LINK} | 125\n\n` +
       '**:x: Отказанные отчёты:**\n' +
-        '-# Упоминание | Имя Фамилия(В отчёте) | Ссылка на отчёт | Причина отказа\n' +
-        'нету',
-    ),
-    fence(
+      '-# Упоминание | Имя Фамилия(В отчёте) | Ссылка на отчёт | Причина отказа\n' +
+      'нету\n\n' +
       '**Кто будет составлять премии**\n' +
-        '-# Имя Фамилия | Ранг | Должность | Ссылка на отчёт | Баллы | Тип премии\n' +
-        `- Vladislav Siberyak | 12 | Delta | ${LINK3} | 125 | Высокая`,
-    ),
+      '-# Имя Фамилия | Ранг | Должность | Ссылка на отчёт | Баллы | Тип премии\n' +
+      `- Vladislav Siberyak | 12 | Delta | ${LINK3} | 125 | Высокая`,
   ]);
+  assert.doesNotMatch(parts[0], /```/); // блоков кода нет
 });
 
 test('формы: нет принятых и премий — пишется «нету»', () => {
   const report = { name: 'Santa Siberyak', rank: '12', position: 'Delta', total: 55 };
   const parts = buildForms([{ checkerId: '9', entries: [{ messageId: '2', verdict: parseCheck(REJECTED), report }] }]);
-  assert.equal(parts.length, 4);
-  assert.match(parts[1],/Принятые отчёты:\*\*\n-# .+\nнету/);
-  assert.match(parts[3],/Кто будет составлять премии\*\*\n-# .+\nнету/);
+  assert.equal(parts.length, 1);
+  assert.match(parts[0], /Принятые отчёты:\*\*\n-# .+\nнету/);
+  assert.match(parts[0], /Кто будет составлять премии\*\*\n-# .+\nнету/);
+});
+
+test('подсказка, как скопировать: отдельное короткое сообщение про «Копировать текст»', () => {
+  assert.match(COPY_HINT, /Копировать текст/);
+  assert.match(COPY_HINT, /правый клик/);
+  assert.ok(COPY_HINT.length < 400);
+  assert.doesNotMatch(COPY_HINT, /```/);
+});
+
+// ── Разбивка на сообщения: одно, если помещается; сообщение не начинается со строки или ссылки ────────
+
+const ALLOWED_START =
+  /^(\*\*Проверил:\*\* <@\d+>|\*\*:white_check_mark: Принятые отчёты:\*\*|\*\*:x: Отказанные отчёты:\*\*|\*\*Кто будет составлять премии\*\*)/;
+const withoutWarnings = (parts) => parts.filter((m) => !m.startsWith('⚠️'));
+
+/** count принятых отчётов одного человека (разные ссылки), плюс отказанные. */
+function manyEntries(count, { user = '10', name = 'Vladislav Siberyak', rejected = 0, offset = 0 } = {}) {
+  const report = { name, rank: '12', position: 'Delta', total: 100 };
+  const accepted = Array.from({ length: count }, (_, i) => ({
+    messageId: `${offset + i}`,
+    verdict: { ...parseCheck(ACCEPTED), userId: user, points: 50 + (i % 40), link: `${LINK}${offset + i}` },
+    report,
+  }));
+  const refused = Array.from({ length: rejected }, (_, i) => ({
+    messageId: `r${offset + i}`,
+    verdict: { ...parseCheck(REJECTED), userId: user, link: `${LINK}r${offset + i}` },
+    report,
+  }));
+  return [...accepted, ...refused];
+}
+
+test('разбивка: ни одно сообщение не начинается со строки, ссылки или тире, при любом размере', () => {
+  for (const count of [0, 1, 3, 10, 14, 15, 16, 17, 20, 40, 100, 250]) {
+    for (const rejected of [0, 5, 30]) {
+      const parts = withoutWarnings(buildForms([{ checkerId: '1', entries: manyEntries(count, { rejected }) }]));
+      assert.ok(parts.length >= 1);
+      for (const [i, m] of parts.entries()) {
+        assert.match(m, ALLOWED_START, `count=${count} rejected=${rejected}: сообщение ${i} начинается с «${m.slice(0, 40)}»`);
+        assert.ok(m.length <= 1900, `count=${count}: сообщение ${i} длиной ${m.length}`);
+      }
+    }
+  }
+});
+
+test('разбивка: несколько проверяющих, линия из тире никогда не открывает сообщение', () => {
+  for (const perChecker of [1, 6, 12, 30, 90]) {
+    const groups = ['111', '222', '333', '444'].map((id, n) => ({
+      checkerId: id,
+      entries: manyEntries(perChecker, { user: `${n + 1}0`, name: `Person Number${n}`, offset: n * 1000 }),
+    }));
+    const parts = withoutWarnings(buildForms(groups));
+    for (const m of parts) {
+      assert.match(m, ALLOWED_START);
+      assert.ok(m.length <= 1900);
+      assert.doesNotMatch(m, /^-{10}/);
+    }
+  }
+});
+
+test('разбивка: очень много принятых — несколько сообщений, каждое начинается с заголовка раздела', () => {
+  const parts = withoutWarnings(buildForms([{ checkerId: '1', entries: manyEntries(60) }]));
+  assert.ok(parts.length >= 3);
+  assert.match(parts[0], /^\*\*Проверил:\*\* <@1>\n\n\*\*:white_check_mark: Принятые отчёты:\*\*/); // первое: «Проверил» и принятые
+  for (const m of parts.slice(1)) assert.doesNotMatch(m, /^\*\*Проверил/);
+  const continuation = parts.slice(1, -1).filter((m) => m.startsWith('**:white_check_mark:'));
+  assert.ok(continuation.length >= 1); // продолжения списка тоже с заголовка «Принятые отчёты»
+
+  // все 60 строк на месте, ни одна не потеряна и не задвоена
+  const rows = parts.join('\n').match(/^- <@10> \| Vladislav Siberyak \|/gm) ?? [];
+  assert.equal(rows.length, 60);
+});
+
+test('разбивка: последняя строка премий не помещается — весь раздел «Кто будет составлять премии» уходит в следующее сообщение', () => {
+  let found = null;
+  for (let count = 1; count <= 40 && !found; count += 1) {
+    const parts = withoutWarnings(buildForms([{ checkerId: '1', entries: manyEntries(count) }]));
+    if (parts.length === 2 && parts[1].startsWith('**Кто будет составлять премии**')) found = { count, parts };
+  }
+  assert.ok(found, 'нужен размер, при котором премии не влезают в первое сообщение');
+
+  const [first, second] = found.parts;
+  assert.doesNotMatch(first, /Кто будет составлять премии/); // в первом премий нет вообще, раздел не разрезан
+  assert.match(first, /Отказанные отчёты/); // всё остальное осталось в первом
+  assert.match(second, /^\*\*Кто будет составлять премии\*\*\n-# .+\n- Vladislav Siberyak \|/);
+  assert.equal(second.split('\n').length, 3); // заголовок, колонки и единственная строка
+});
+
+test('разбивка: маленький отчёт — ровно одно сообщение, большой — несколько', () => {
+  assert.equal(buildForms([{ checkerId: '1', entries: manyEntries(3) }]).length, 1);
+  assert.ok(buildForms([{ checkerId: '1', entries: manyEntries(80) }]).length > 1);
 });
 
 test('общий отчёт: блоки «Проверил» на каждого, премии одним списком, повторная ссылка отмечается', () => {
@@ -247,11 +331,11 @@ test('премия: общий отчёт выбирает лучший отчё
     { checkerId: '111', entries: [entry('1', '10', { points: 60 })] },
     { checkerId: '222', entries: [entry('2', '10', { points: 125 })] }, // тот же человек у другого проверяющего
   ]);
-  const premiums = parts.find((m) => m.includes('Кто будет составлять премии'));
-  assert.equal((premiums.match(/^- Vladislav Siberyak \|/gm) ?? []).length, 1); // один человек — одна строка
-  assert.match(premiums, /2 \| 125 \| Высокая/);
+  const text = parts.join('\n');
+  assert.equal((text.match(/^- Vladislav Siberyak \|/gm) ?? []).length, 1); // в премиях один человек — одна строка
+  assert.match(text, /2 \| 125 \| Высокая/);
   // а в списках принятых у каждого проверяющего его отчёт на месте
-  assert.equal(parts.filter((m) => m.includes('Принятые отчёты') && m.includes('| Vladislav Siberyak |')).length, 2);
+  assert.equal((text.match(/^- <@10> \| Vladislav Siberyak \|/gm) ?? []).length, 2);
 });
 
 test('премия: предупреждение про «ниже 10 баллов» только про лучший отчёт', () => {
@@ -351,19 +435,17 @@ test('общий отчёт: перед «Проверил» линия из т�
   const report = { name: 'Name Surname', rank: '12', position: 'Delta', total: 100 };
   const entry = (id, user) => ({ messageId: id, verdict: { ...parseCheck(ACCEPTED), userId: user, link: `${LINK}${id}` }, report });
   const dashes = '-'.repeat(36);
-  const parts = buildForms(
-    [
-      { checkerId: '111', entries: [entry('1', '10')] },
-      { checkerId: '222', entries: [entry('2', '20')] },
-      { checkerId: '333', entries: [entry('3', '30')] },
-    ],
-    (text) => text, // общий отчёт идёт обычным текстом
-  );
-  const heads = parts.filter((m) => m.includes('**Проверил:**'));
-  assert.equal(heads.length, 3);
-  assert.equal(heads[0], '**Проверил:** <@111>'); // у первого линии нет
-  assert.equal(heads[1], `${dashes}\n**Проверил:** <@222>`);
-  assert.equal(heads[2], `${dashes}\n**Проверил:** <@333>`);
+  const parts = buildForms([
+    { checkerId: '111', entries: [entry('1', '10')] },
+    { checkerId: '222', entries: [entry('2', '20')] },
+    { checkerId: '333', entries: [entry('3', '30')] },
+  ]);
+  assert.equal(parts.length, 1); // небольшой отчёт — одно сообщение
+  const [text] = parts;
+  assert.ok(text.startsWith('**Проверил:** <@111>')); // сообщение начинается с «Проверил», а не с линии
+  assert.equal(text.split(dashes).length - 1, 2); // линий две: перед вторым и перед третьим
+  assert.ok(text.includes(`\n\n${dashes}\n**Проверил:** <@222>`));
+  assert.ok(text.includes(`\n\n${dashes}\n**Проверил:** <@333>`));
   assert.equal(dashes.length, 36);
 
   // у одного проверяющего (/отчет) линии нет

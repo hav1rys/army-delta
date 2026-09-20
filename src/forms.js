@@ -84,7 +84,7 @@ export function formRows(entries) {
   return { ...lists, bonuses: premium.bonuses, warnings: [...lists.warnings, ...premium.warnings] };
 }
 
-const CAPACITY = LIMIT - 8; // минус «```\n» и «\n```»
+const CAPACITY = LIMIT;
 const SEPARATOR = '-'.repeat(36); // линия между проверяющими в общем отчёте
 
 const COLUMNS = {
@@ -93,48 +93,82 @@ const COLUMNS = {
   bonuses: '-# Имя Фамилия | Ранг | Должность | Ссылка на отчёт | Баллы | Тип премии',
 };
 
-const code = (text) => `\`\`\`\n${text}\n\`\`\``;
+const HEADERS = {
+  accepted: ['**:white_check_mark: Принятые отчёты:**', COLUMNS.accepted],
+  rejected: ['**:x: Отказанные отчёты:**', COLUMNS.rejected],
+  bonuses: ['**Кто будет составлять премии**', COLUMNS.bonuses],
+};
 
 /**
- * Раздел -> сообщения (каждое в обёртке wrap). Длинный список делится на несколько сообщений,
- * заголовок повторяется; пустой раздел не пропускается, вместо строк пишется «нету».
+ * Раздел -> куски текста. Раздел, который помещается в сообщение, остаётся одним куском и не режется.
+ * Слишком большой делится на несколько кусков, и каждый начинается с заголовка раздела, а не со строки.
+ * Пустой раздел не пропускается, вместо строк пишется «нету».
+ * reserve — сколько места занимает то, что будет приписано перед первым куском («Проверил»).
  */
-function section(headerLines, rows, wrap) {
-  if (rows.length === 0) return [wrap([...headerLines, 'нету'].join('\n'))];
-  const out = [];
+function sectionChunks(headerLines, rows, reserve = 0) {
+  if (rows.length === 0) return [[...headerLines, 'нету'].join('\n')];
   const text = (rs) => [...headerLines, ...rs.map((r) => `- ${r}`)].join('\n');
-  let cur = [];
+  if (text(rows).length + reserve <= CAPACITY) return [text(rows)];
+
+  const chunks = [];
+  let current = [];
+  let room = CAPACITY - reserve;
   for (const row of rows) {
-    if (cur.length && text([...cur, row]).length > CAPACITY) {
-      out.push(wrap(text(cur)));
-      cur = [];
+    if (current.length && text([...current, row]).length > room) {
+      chunks.push(text(current));
+      current = [];
+      room = CAPACITY;
     }
-    cur.push(row);
+    current.push(row);
   }
-  if (cur.length) out.push(wrap(text(cur)));
-  return out;
+  chunks.push(text(current));
+  return chunks;
 }
 
 /**
- * Формы: «Проверил», принятые, отказанные, премии — каждая часть отдельным сообщением.
+ * Куски -> сообщения. Пока следующий кусок целиком помещается, он идёт в то же сообщение; иначе начинается новое.
+ * Поэтому сообщение всегда начинается с начала куска: с «Проверил» или с заголовка раздела, но не со строки или ссылки.
+ * lead — линия-разделитель перед куском; ставится только внутри сообщения, а в начале сообщения не нужна.
+ */
+function pack(chunks) {
+  const messages = [];
+  let current = '';
+  for (const { text, lead = '' } of chunks) {
+    const joined = current ? `${current}\n\n${lead}${text}` : text;
+    if (current && joined.length > CAPACITY) {
+      messages.push(current);
+      current = text;
+    } else {
+      current = joined;
+    }
+  }
+  if (current) messages.push(current);
+  return messages;
+}
+
+/**
+ * Формы: «Проверил», принятые, отказанные, премии. Если всё помещается, приходит одно сообщение; если нет, несколько.
  * groups: [{ checkerId, entries }]. На каждого проверяющего свои «Проверил», принятые и отказанные подряд;
  * премии — одним общим списком в конце. Предупреждения — отдельным обычным сообщением.
- * wrap: как оформить сообщение; по умолчанию блок кода для копирования, (t) => t даёт обычный текст.
+ * Всё идёт обычным текстом, без блоков кода: копировать через «Копировать текст» в меню сообщения (см. COPY_HINT).
  */
-export function buildForms(groups, wrap = code) {
+export function buildForms(groups) {
   const rows = groups.map(({ checkerId, entries }) => ({ checkerId, ...listRows(entries) }));
   // Премия одним списком по всем проверяющим: у каждого человека берётся один лучший принятый отчёт.
   const premium = premiumRows(groups.flatMap((g) => g.entries));
 
-  const messages = [];
+  const chunks = [];
   for (const [i, r] of rows.entries()) {
-    // Начиная со второго проверяющего перед «Проверил» ставится длинная линия из тире, чтобы блоки не сливались.
     const head = `**Проверил:** <@${r.checkerId}>`;
-    messages.push(wrap(i > 0 ? `${SEPARATOR}\n${head}` : head));
-    messages.push(...section(['**:white_check_mark: Принятые отчёты:**', COLUMNS.accepted], r.accepted, wrap));
-    messages.push(...section(['**:x: Отказанные отчёты:**', COLUMNS.rejected], r.rejected, wrap));
+    const accepted = sectionChunks(HEADERS.accepted, r.accepted, head.length + 2);
+    // «Проверил» приписывается к первому куску, а со второго проверяющего перед ним ставится линия из тире.
+    chunks.push({ text: `${head}\n\n${accepted[0]}`, lead: i > 0 ? `${SEPARATOR}\n` : '' });
+    chunks.push(...accepted.slice(1).map((text) => ({ text })));
+    chunks.push(...sectionChunks(HEADERS.rejected, r.rejected).map((text) => ({ text })));
   }
-  messages.push(...section(['**Кто будет составлять премии**', COLUMNS.bonuses], premium.bonuses, wrap));
+  chunks.push(...sectionChunks(HEADERS.bonuses, premium.bonuses).map((text) => ({ text })));
+
+  const messages = pack(chunks);
 
   const warnings = [...rows.flatMap((r) => r.warnings), ...premium.warnings];
   const seen = new Set();
@@ -147,3 +181,8 @@ export function buildForms(groups, wrap = code) {
   if (warnings.length) messages.push(`⚠️ Проверьте вручную:\n${warnings.map((w) => `- ${w}`).join('\n')}`.slice(0, 2000));
   return messages;
 }
+
+/** Отдельное сообщение после форм: как скопировать текст целиком (для тех, кто не знает про «Копировать текст»). */
+export const COPY_HINT =
+  '💡 Как скопировать форму целиком: правый клик по сообщению (на телефоне — долгое нажатие) → «Копировать текст». ' +
+  'Копируется весь текст вместе с разметкой, выделять и нажимать Ctrl+C не нужно.';

@@ -68,7 +68,9 @@ test('ответ: есть, отказан, ждёт проверки, нет, �
 });
 
 test('ответ: пустой ввод и все отчёты на месте', () => {
-  assert.match(lookupMessages(setup(), '  ,  ')[0], /Ничего не распознал/);
+  const empty = lookupMessages(setup(), '  ,  ');
+  assert.equal(empty.length, 1);
+  assert.match(empty[0].error, /Ничего не распознал/); // это ошибка: придёт ответом на команду
   const [text] = lookupMessages(setup(), 'Vladislav Siberyak');
   assert.doesNotMatch(text, /Нет отчёта:/); // раздела «нет» нет, когда все есть
   assert.match(text, /отчёт есть у 1, нет у 0 \(из 1\)/);

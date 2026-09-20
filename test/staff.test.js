@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { ActingFor } from '../src/acting.js';
 import { addAccepted, removeByLinkAllowed } from '../src/manual.js';
-import { leadershipMessage, memoMessages, unregisteredMessage } from '../src/memo.js';
+import { leadershipMessage, memoMessages, supportMessage, unregisteredMessage } from '../src/memo.js';
 import { STAFF_BUTTONS, STAFF_MODALS, STAFF_ROLES, Staff, panelMessage, roleByRank, roleTitle, staffModal } from '../src/staff.js';
 import { statsMessages } from '../src/stats.js';
 import { Store } from '../src/store.js';
@@ -325,4 +325,24 @@ test('несколько владельцев: ID через запятую, у 
 test('панель показывает метку сборки', () => {
   const footer = panelMessage(tempStaff(), OWNER).embeds[0].toJSON().footer.text;
   assert.match(footer, /^Сборка: /);
+});
+
+test('справка: кому писать по вопросам, предложениям и багам', () => {
+  // не задано: havirys, в обратных кавычках
+  const byDefault = supportMessage('');
+  assert.equal(byDefault, '**По Вопросам/Предложениям/Багам писать в ЛС Discord:** `havirys`');
+  assert.equal(supportMessage(undefined), byDefault);
+  assert.equal(supportMessage(' , '), byDefault);
+
+  // задано в настройке: подставляется оно, тоже в кавычках
+  assert.equal(supportMessage('vadim'), '**По Вопросам/Предложениям/Багам писать в ЛС Discord:** `vadim`');
+  // несколько, лишние пробелы и пустые элементы не мешают
+  assert.match(supportMessage(' havirys ,  vadim,, '), /Discord:\*\* `havirys`, `vadim`$/);
+  // числовой ID превращается в упоминание
+  assert.match(supportMessage('123456789012345678'), /Discord:\*\* <@123456789012345678>$/);
+
+  // лишних слов нет
+  assert.doesNotMatch(byDefault, /Контакты для связи/);
+  assert.doesNotMatch(byDefault, /официальн/i);
+  assert.doesNotMatch(byDefault, /Хаверус/);
 });
