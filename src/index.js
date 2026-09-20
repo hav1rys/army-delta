@@ -34,6 +34,7 @@ import {
 } from './manual.js';
 import { ActingFor } from './acting.js';
 import { BUILD } from './build.js';
+import { deliver, say } from './deliver.js';
 import { leadershipMessage, memoMessages, unregisteredMessage } from './memo.js';
 import {
   STAFF_BUTTONS,
@@ -113,9 +114,6 @@ const everyStore = () => allCheckerIds().map((checkerId) => ({ checkerId, store:
 function isAllowed(userId, guildId, channelId) {
   return isUserAllowed(userId) && (guildId === null || (CHANNEL_ID !== '' && channelId === CHANNEL_ID));
 }
-
-// Обычное сообщение в тот же чат, а не «ответ» на сообщение пользователя: без строки-цитаты сверху.
-const say = (message, content) => message.channel.send({ content, allowedMentions: noPings });
 
 const textOption = (name, description, required = true) => ({
   name,
@@ -426,43 +424,6 @@ async function onPanelInteraction(interaction) {
   }
 }
 
-/**
- * Доставка ответа команды. Сообщение — строка или готовое содержимое ({ embeds, components }).
- * В личке с ботом: первое сообщение — ответ на команду, остальные обычными сообщениями друг за другом
- * (follow-up'ы Discord показывает как ответы на предыдущее).
- * На сервере: всё уходит вам в личные сообщения, а в канале виден только короткий ответ, который видите лишь вы.
- */
-async function deliver(interaction, messages) {
-  const payloads = messages.map((m) => ({ ...(typeof m === 'string' ? { content: m } : m), allowedMentions: noPings }));
-
-  if (!interaction.inGuild()) {
-    const [first, ...rest] = payloads;
-    await interaction.editReply(first);
-    let channel = interaction.channel ?? (await interaction.user.createDM().catch(() => null));
-    for (const payload of rest) {
-      if (channel) {
-        try {
-          await channel.send(payload);
-          continue;
-        } catch {
-          channel = null; // нет доступа к чату — дальше follow-up'ами
-        }
-      }
-      await interaction.followUp(payload);
-    }
-    return;
-  }
-
-  try {
-    for (const payload of payloads) await interaction.user.send(payload);
-    await interaction.editReply({ content: 'Отправил вам в личные сообщения.' });
-  } catch {
-    // Личка закрыта: показываем здесь, но только вам.
-    await interaction.editReply({ content: 'Не удалось написать вам в личные сообщения, показываю здесь (видите только вы).' });
-    for (const payload of payloads) await interaction.followUp({ ...payload, flags: MessageFlags.Ephemeral });
-  }
-}
-
 client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isButton() || interaction.isModalSubmit()) {
     const handler = isStaffInteractionId(interaction.customId) ? onPanelInteraction : null;
@@ -472,16 +433,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   const command = COMMANDS[interaction.commandName];
   if (!command) return;
-  if (!command.open && !isUserAllowed(interaction.user.id)) {
-    return interaction.reply({ content: unregisteredMessage(interaction.user.id), flags: MessageFlags.Ephemeral });
-  }
   try {
     await interaction.deferReply({ flags: interaction.inGuild() ? MessageFlags.Ephemeral : undefined });
-    await deliver(interaction, command.run(interaction.user.id, interaction));
+    const notRegistered = !command.open && !isUserAllowed(interaction.user.id);
+    const messages = notRegistered ? [unregisteredMessage(interaction.user.id)] : command.run(interaction.user.id, interaction);
+    await deliver(interaction, messages);
   } catch (err) {
     console.error(`Ошибка команды /${interaction.commandName}:`, err);
-    const content = `Ошибка: ${err.message}`;
-    await (interaction.deferred ? interaction.editReply(content) : interaction.reply({ content, flags: MessageFlags.Ephemeral })).catch(() => {});
+    if (interaction.deferred) await deliver(interaction, [`Ошибка: ${err.message}`]).catch(() => {});
+    else await interaction.reply({ content: `Ошибка: ${err.message}`, flags: MessageFlags.Ephemeral }).catch(() => {});
   }
 });
 
