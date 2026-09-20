@@ -119,7 +119,7 @@ export function parseCheck(text) {
 
 /** Убирает из хвоста строки с id ник вида «@[Delta] Имя Фамилия [12]» и оставляет причину. */
 function extractReason(rest) {
-  const s = rest.trim();
+  const s = rest.trim().replace(/^\|\s*/, '');
   const mention = /^<@!?\d+>\s*/.exec(s);
   if (mention) return clean(s.slice(mention[0].length));
   // Ник заканчивается на «[ранг]»: режем до первой такой скобки, остальное — причина.
@@ -129,6 +129,31 @@ function extractReason(rest) {
 }
 
 const clean = (s) => s.replace(/\s+/g, ' ').trim();
+
+/**
+ * Что не хватает в сообщении, которое не распозналось ни как отчёт, ни как проверка.
+ * Возвращает { kind: 'report' | 'check', problems: [...] } или null, если сообщение ни на что не похоже.
+ */
+export function diagnose(text) {
+  const src = text ?? '';
+  const lines = src.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+
+  if (/Сотрудник|Звание|ИТОГО\s+БАЛЛОВ/i.test(src)) {
+    const problems = ['Сотрудник', 'Звание']
+      .filter((label) => !valueAfter(lines, label))
+      .map((label) => `в отчёте нет поля «${label}»`);
+    return { kind: 'report', problems };
+  }
+
+  const hasId = /(?:^|\n)[ \t]*\d{17,20}[ \t]*\|/.test(src) || /<@!?\d{17,20}>/.test(src);
+  const looksLikeCheck = hasId || /Изменение\s+баллов|Минимум\s+\d+|(?:^|\n)\s*\d+\s*балл/i.test(src);
+  if (!looksLikeCheck) return null;
+
+  const problems = [];
+  if (!findMessageLink(src)) problems.push('нет ссылки на отчёт (первой строкой)');
+  if (!hasId) problems.push('нет ID автора: нужна строка вида «766166436656709642 | ник»');
+  return { kind: 'check', problems };
+}
 
 /** «Имя Фамилия» -> «Имя_Фамилия» (формат игрового ника для формы 3). */
 export const toGameNick = (name) => name.trim().replace(/\s+/g, '_');

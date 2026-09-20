@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   ApplicationIntegrationType,
   Client,
@@ -9,14 +11,14 @@ import {
   Partials,
 } from 'discord.js';
 import { buildForms, entryPoints } from './forms.js';
-import { bonusType, findMessageLink, flattenEmbeds, messageLink, parseCheck, parseReport } from './parsing.js';
+import { bonusType, diagnose, findMessageLink, flattenEmbeds, messageLink, parseCheck, parseReport } from './parsing.js';
 import { Store } from './store.js';
 
 const {
   DISCORD_TOKEN,
   ALLOWED_USER_IDS = '',
   CHANNEL_ID = '',
-  DATA_FILE = './data/state.json',
+  DATA_DIR = './data',
 } = process.env;
 if (!DISCORD_TOKEN) {
   console.error('Не задана переменная окружения DISCORD_TOKEN');
@@ -24,7 +26,22 @@ if (!DISCORD_TOKEN) {
 }
 
 const allowedUsers = new Set(ALLOWED_USER_IDS.split(',').map((s) => s.trim()).filter(Boolean));
-const store = new Store(DATA_FILE);
+
+// У каждого пользователя своё хранилище: отчёты и проверки разных людей не смешиваются.
+const stores = new Map();
+function storeFor(userId) {
+  if (!stores.has(userId)) stores.set(userId, new Store(path.join(DATA_DIR, `${userId}.json`)));
+  return stores.get(userId);
+}
+
+/** Все, у кого есть сохранённые данные: уже загруженные в память и лежащие на диске (файл <id>.json). */
+function allCheckerIds() {
+  const onDisk = fs.existsSync(DATA_DIR)
+    ? fs.readdirSync(DATA_DIR).filter((f) => /^\d+\.json$/.test(f)).map((f) => f.slice(0, -'.json'.length))
+    : [];
+  return [...new Set([...onDisk, ...stores.keys()])];
+}
+
 const noPings = { parse: [] };
 
 const client = new Client({
@@ -37,27 +54,39 @@ const client = new Client({
   partials: [Partials.Channel, Partials.Message],
 });
 
-/** Работаем только в личке и (если задан) в одном канале, и только для разрешённых пользователей. */
+const isUserAllowed = (userId) => allowedUsers.size === 0 || allowedUsers.has(userId);
+
+/** Пересланные сообщения принимаем только в личке и (если задан) в одном канале, и только от разрешённых пользователей. */
 function isAllowed(userId, guildId, channelId) {
-  if (allowedUsers.size && !allowedUsers.has(userId)) return false;
-  return guildId === null || (CHANNEL_ID !== '' && channelId === CHANNEL_ID);
+  return isUserAllowed(userId) && (guildId === null || (CHANNEL_ID !== '' && channelId === CHANNEL_ID));
 }
 
 const reply = (message, content) => message.reply({ content, allowedMentions: { ...noPings, repliedUser: false } });
 
 // Слэш-команды. Каждая возвращает список сообщений для ответа.
 const COMMANDS = {
-  'итог': {
-    description: 'Собрать три формы из накопленных отчётов и проверок',
+  'отчет': {
+    description: 'Три формы по отчётам, которые проверили вы',
     run(userId) {
-      const entries = store.entries();
-      return entries.length ? buildForms(entries, userId) : ['Пока нет ни одной проверки.'];
+      const entries = storeFor(userId).entries();
+      return entries.length ? buildForms([{ checkerId: userId, entries }]) : ['Пока нет ни одной проверки.'];
+    },
+  },
+
+  'общий-отчет': {
+    description: 'Три формы по отчётам всех проверяющих',
+    run() {
+      const groups = allCheckerIds()
+        .map((checkerId) => ({ checkerId, entries: storeFor(checkerId).entries() }))
+        .filter((g) => g.entries.length);
+      return groups.length ? buildForms(groups) : ['Пока нет ни одной проверки.'];
     },
   },
 
   'статус': {
     description: 'Сколько принято/отказано и чего не хватает',
-    run() {
+    run(userId) {
+      const store = storeFor(userId);
       const entries = store.entries();
       const accepted = entries.filter((e) => e.verdict.accepted).length;
       const lines = [`Принято: ${accepted}, отказано: ${entries.length - accepted}`];
@@ -75,8 +104,8 @@ const COMMANDS = {
 
   'очистить': {
     description: 'Удалить все накопленные отчёты и проверки',
-    run() {
-      store.clear();
+    run(userId) {
+      storeFor(userId).clear();
       return ['Всё очищено.'];
     },
   },
@@ -88,8 +117,9 @@ client.once(Events.ClientReady, async (c) => {
     Object.entries(COMMANDS).map(([name, { description }]) => ({
       name,
       description,
-      contexts: [InteractionContextType.Guild, InteractionContextType.BotDM],
-      integrationTypes: [ApplicationIntegrationType.GuildInstall],
+      contexts: [InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel],
+      // UserInstall: приложение ставится на аккаунт, и писать боту в личку можно без общего сервера.
+      integrationTypes: [ApplicationIntegrationType.GuildInstall, ApplicationIntegrationType.UserInstall],
     })),
   );
   console.log(`Слэш-команды зарегистрированы: ${Object.keys(COMMANDS).map((n) => `/${n}`).join(', ')}`);
@@ -99,14 +129,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   const command = COMMANDS[interaction.commandName];
   if (!command) return;
-  if (!isAllowed(interaction.user.id, interaction.guildId, interaction.channelId)) {
-    return interaction.reply({ content: 'Нет доступа.', flags: MessageFlags.Ephemeral });
+  if (!isUserAllowed(interaction.user.id)) {
+    return interaction.reply({
+      content: `Нет доступа: вашего ID (${interaction.user.id}) нет в ALLOWED_USER_IDS.`,
+      flags: MessageFlags.Ephemeral,
+    });
   }
+  // В серверных каналах ответ видит только вызвавший; в личке с ботом это и так приватно.
+  const flags = interaction.inGuild() ? MessageFlags.Ephemeral : undefined;
   try {
-    await interaction.deferReply();
+    await interaction.deferReply({ flags });
     const [first, ...rest] = command.run(interaction.user.id);
     await interaction.editReply({ content: first, allowedMentions: noPings });
-    for (const content of rest) await interaction.followUp({ content, allowedMentions: noPings });
+    for (const content of rest) await interaction.followUp({ content, flags, allowedMentions: noPings });
   } catch (err) {
     console.error(`Ошибка команды /${interaction.commandName}:`, err);
     const content = `Ошибка: ${err.message}`;
@@ -131,6 +166,7 @@ async function handleReport(message, report, { snapshot, text }) {
     : findMessageLink(text);
   if (!ref) return reply(message, 'Это похоже на отчёт, но нет ссылки на исходное сообщение. Перешлите отчёт (Forward), а не копируйте.');
 
+  const store = storeFor(message.author.id);
   store.setReport(ref.messageId, { ...report, link: ref.link });
   const who = `${report.name} (ранг ${report.rank ?? '?'}, ${report.position ?? '?'})`;
   const verdict = store.verdict(ref.messageId);
@@ -138,7 +174,8 @@ async function handleReport(message, report, { snapshot, text }) {
   return reply(message, `🔗 ${describe(store.entry(ref.messageId))}`);
 }
 
-function saveCheck(check) {
+async function handleCheck(message, check) {
+  const store = storeFor(message.author.id);
   store.setVerdict(check.messageId, {
     userId: check.userId,
     accepted: check.accepted,
@@ -147,10 +184,6 @@ function saveCheck(check) {
     reason: check.reason,
     link: check.link,
   });
-}
-
-async function handleCheck(message, check) {
-  saveCheck(check);
   const entry = store.entry(check.messageId);
   if (!entry.report) return reply(message, `Проверка сохранена, но отчёта нет — перешлите отчёт: ${check.link}`);
   return reply(message, describe(entry));
@@ -182,7 +215,13 @@ async function onMessage(message) {
   if (check) return handleCheck(message, check);
 
   console.log('Не распознано сообщение:', JSON.stringify(payload.text).slice(0, 500));
-  return reply(message, 'Не понял, что это. Жду пересланный отчёт или проверку (ссылка на отчёт, затем «id | ник ...»). Команды: /итог, /статус, /очистить.');
+  const problem = diagnose(payload.text);
+  if (problem?.problems.length) {
+    const what = problem.kind === 'report' ? 'отчёт' : 'проверку';
+    const list = problem.problems.map((p) => `- ${p}`).join('\n');
+    return reply(message, `Не могу принять ${what}, не хватает:\n${list}`);
+  }
+  return reply(message, 'Не понял, что это. Жду пересланный отчёт или проверку (ссылка на отчёт, «id | ник ...», баллы или причина отказа). Команды: /отчет, /общий-отчет, /статус, /очистить.');
 }
 
 process.on('unhandledRejection', (err) => console.error('Ошибка:', err));

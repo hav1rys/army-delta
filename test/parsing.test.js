@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildForms, formRows } from '../src/forms.js';
-import { bonusType, flattenEmbeds, parseCheck, parseReport } from '../src/parsing.js';
+import { bonusType, diagnose, flattenEmbeds, parseCheck, parseReport } from '../src/parsing.js';
 
 const LINK = 'https://discord.com/channels/713076174108229712/1027944923829383188/1548582679338024982';
 
@@ -70,6 +70,42 @@ test('нет ссылки — не проверка', () => {
   assert.equal(parseCheck('466633638511902752 | @x [12] 125 баллов'), null);
 });
 
+// Проверка со скриншота пользователя: без ссылки на отчёт.
+const NO_LINK = `766166436656709642 | [Delta] Matvey_Siberyak [12]
+Изменение баллов:
+Нет
+-/+ Балов | Активности | Причина
+---------------------------------
+90 баллов
+Минимум 50 баллов`;
+
+test('что не хватает: проверка без ссылки', () => {
+  assert.equal(parseCheck(NO_LINK), null);
+  assert.deepEqual(diagnose(NO_LINK), { kind: 'check', problems: ['нет ссылки на отчёт (первой строкой)'] });
+});
+
+test('что не хватает: проверка без id и без ссылки', () => {
+  const d = diagnose('Изменение баллов:\nНет\n90 баллов\nМинимум 50 баллов');
+  assert.equal(d.kind, 'check');
+  assert.equal(d.problems.length, 2);
+});
+
+test('что не хватает: ссылка есть, id нет', () => {
+  const d = diagnose(`${LINK}\n@maboy | [Delta] Matvey_Siberyak [12]\n90 баллов`);
+  assert.deepEqual(d, { kind: 'check', problems: ['нет ID автора: нужна строка вида «766166436656709642 | ник»'] });
+});
+
+test('что не хватает: отчёт без звания', () => {
+  assert.deepEqual(diagnose('Еженедельный отчёт Delta\nСотрудник\nLi Il'), {
+    kind: 'report',
+    problems: ['в отчёте нет поля «Звание»'],
+  });
+});
+
+test('что не хватает: обычная болтовня — null', () => {
+  assert.equal(diagnose('привет, как дела'), null);
+});
+
 test('отчёт из эмбеда', () => {
   assert.deepEqual(parseReport(flattenEmbeds(REPORT_EMBED)), {
     name: 'Li Il',
@@ -106,13 +142,29 @@ test('формы: принятый, отказанный и премия', () =>
   assert.match(rows.rejected[0], /^<@466633638511902752> \| Santa Siberyak \| .+ \| У тебя альбом пуст$/);
   assert.deepEqual(rows.bonuses, [`Vladislav_Siberyak | 12 | Delta | ${LINK} | 125 | Высокая`]);
   assert.deepEqual(rows.warnings, []);
-  assert.ok(buildForms(entries, '1').every((m) => m.length <= 2000));
+  assert.ok(buildForms([{ checkerId: '1', entries }]).every((m) => m.length <= 2000));
+});
+
+test('общий отчёт: блоки «Проверил» на каждого, премии одним списком, дубли отмечаются', () => {
+  const report = { name: 'Name Surname', rank: '12', position: 'Delta', total: 100 };
+  const a = { messageId: '1', verdict: parseCheck(ACCEPTED), report };
+  const b = { messageId: '2', verdict: parseCheck(REJECTED), report };
+  const parts = buildForms([
+    { checkerId: '111', entries: [a] },
+    { checkerId: '222', entries: [b, { ...a }] }, // отчёт «1» проверили оба
+  ]);
+  const text = parts.join('\n');
+  assert.match(text, /Проверил: <@111>/);
+  assert.match(text, /Проверил: <@222>/);
+  assert.equal(parts.filter((m) => m.includes('3. Кто будет составлять премии')).length, 1);
+  assert.equal((text.match(/Vladislav|Name_Surname/g) ?? []).length, 2); // в форме 3 — обе принятые строки
+  assert.match(text, /Отчёт проверили несколько человек/);
 });
 
 test('формы: длинный список делится на сообщения', () => {
   const report = { name: 'Name Surname', rank: '12', position: 'Delta', total: 100 };
   const entries = Array.from({ length: 60 }, (_, i) => ({ messageId: `${i}`, verdict: parseCheck(ACCEPTED), report }));
-  const parts = buildForms(entries, '1');
+  const parts = buildForms([{ checkerId: '1', entries }]);
   assert.ok(parts.length > 3);
   assert.ok(parts.every((m) => m.length <= 2000));
 });

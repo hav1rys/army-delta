@@ -70,26 +70,41 @@ function blocks(title, columns, rows, prefix = '') {
   return out;
 }
 
-export function buildForms(entries, checkerId) {
-  const { accepted, rejected, bonuses, warnings } = formRows(entries);
-  const who = checkerId ? `Проверил: <@${checkerId}>\n` : '';
+/**
+ * Три формы из проверок одного или нескольких проверяющих.
+ * groups: [{ checkerId, entries }]. Формы 1 и 2 — отдельным блоком «Проверил: …» на каждого проверяющего,
+ * форма 3 (премии) — одним общим списком.
+ */
+export function buildForms(groups) {
+  const rows = groups.map(({ checkerId, entries }) => ({ checkerId, ...formRows(entries) }));
+
+  const perChecker = (title, columns, key) =>
+    rows.flatMap((r) => blocks(title, columns, r[key], `Проверил: <@${r.checkerId}>\n`));
+
+  const warnings = rows.flatMap((r) => r.warnings);
+  const seen = new Set();
+  for (const { entries } of groups) {
+    for (const { messageId, verdict } of entries) {
+      if (seen.has(messageId)) warnings.push(`Отчёт проверили несколько человек: ${verdict.link}`);
+      seen.add(messageId);
+    }
+  }
+
   const messages = [
-    ...blocks(
+    ...perChecker(
       '**1. ✅ Принятые отчёты**',
       'Упоминание | Имя Фамилия(В отчёте) | Ссылка на отчёт | Баллы',
-      accepted,
-      who,
+      'accepted',
     ),
-    ...blocks(
+    ...perChecker(
       '**2. ❌ Отказанные отчёты**',
       'Упоминание | Имя Фамилия(В отчёте) | Ссылка на отчёт | Причина отказа',
-      rejected,
-      who,
+      'rejected',
     ),
     ...blocks(
       '**3. Кто будет составлять премии**',
       'Имя Фамилия | Ранг | Должность | Ссылка на отчёт | Баллы | Тип премии',
-      bonuses,
+      rows.flatMap((r) => r.bonuses),
     ),
   ];
   if (warnings.length) messages.push(`⚠️ Проверьте вручную:\n${warnings.map((w) => `- ${w}`).join('\n')}`.slice(0, 2000));
