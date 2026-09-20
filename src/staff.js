@@ -168,6 +168,8 @@ export const STAFF_BUTTONS = {
   name: 'staff:name',
   addReport: 'staff:addreport',
   removeReport: 'staff:removereport',
+  editReport: 'staff:editreport',
+  profile: 'staff:profile',
 };
 export const STAFF_MODALS = {
   add: 'staff:addmodal',
@@ -175,6 +177,8 @@ export const STAFF_MODALS = {
   name: 'staff:namemodal',
   addReport: 'staff:addreportmodal',
   removeReport: 'staff:removereportmodal',
+  editReport: 'staff:editreportmodal',
+  profile: 'staff:profilemodal',
 };
 export const isStaffInteractionId = (customId) => customId.startsWith('staff:');
 
@@ -205,14 +209,19 @@ export function panelMessage(staff, actorId) {
   if (!staff.assignableRoles(actorId).length) return { embeds: [embed], components: [] };
 
   const button = (kind, label, style) => new ButtonBuilder().setCustomId(STAFF_BUTTONS[kind]).setLabel(label).setStyle(style);
-  const row = new ActionRowBuilder().addComponents(
+  const buttons = [
     button('add', 'Добавить', ButtonStyle.Success),
     button('remove', 'Убрать', ButtonStyle.Danger),
     button('name', 'Изменить имя', ButtonStyle.Secondary),
     button('addReport', 'Добавить отчёт', ButtonStyle.Primary),
     button('removeReport', 'Убрать отчёт', ButtonStyle.Danger),
-  );
-  return { embeds: [embed], components: [row] };
+    button('editReport', 'Изменить отчёт', ButtonStyle.Primary),
+    button('profile', 'Профиль', ButtonStyle.Secondary),
+  ];
+  // В ряду не больше пяти кнопок Discord: пять и две.
+  const components = [];
+  for (let i = 0; i < buttons.length; i += 5) components.push(new ActionRowBuilder().addComponents(buttons.slice(i, i + 5)));
+  return { embeds: [embed], components };
 }
 
 const textInput = (id, label, { required = true, placeholder, maxLength = 100 } = {}) =>
@@ -249,6 +258,12 @@ export function staffModal(kind) {
         .addComponents(idField, textInput('name', 'Новые имя и фамилия', { placeholder: NAME_PLACEHOLDER }));
     case 'addReport':
       return modal.setTitle('Добавить отчёт').addComponents(textInput('user', 'ID того, за кого записываете отчёт'));
+    case 'editReport':
+      return modal
+        .setTitle('Изменить отчёт')
+        .addComponents(textInput('link', 'Ссылка на отчёт', { maxLength: 200, placeholder: 'https://discord.com/channels/…' }));
+    case 'profile':
+      return modal.setTitle('Профиль').addComponents(textInput('user', 'ID человека или упоминание'));
     case 'removeReport':
       return modal
         .setTitle('Убрать отчёт')

@@ -29,6 +29,12 @@ export class Store {
     this.save();
   }
 
+  /** Меняет проверку на месте, не перенося её в конец списка (правка уже сохранённого отчёта). */
+  updateVerdict(messageId, verdict) {
+    this.data.verdicts[messageId] = verdict;
+    this.save();
+  }
+
   /** Перекладывает отчёт под другой id (когда id при пересылке не совпал с id из ссылки в проверке). */
   moveReport(fromId, toId) {
     this.data.reports[toId] = this.data.reports[fromId];

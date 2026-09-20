@@ -154,7 +154,7 @@ test('панель: все шесть рангов с числами, инстр
   assert.equal(fields[0].value, '—');
 });
 
-test('панель: пять кнопок у тех, у кого есть кто-то ниже; у инструктора кнопок нет', () => {
+test('панель: семь кнопок в двух рядах у тех, у кого есть кто-то ниже; у инструктора кнопок нет', () => {
   const staff = tempStaff();
   staff.add('deputy', '4');
   staff.add('instructor', '6');
@@ -162,7 +162,7 @@ test('панель: пять кнопок у тех, у кого есть кто
   const buttonsOf = (actor) => panelMessage(staff, actor).components.flatMap((row) => row.toJSON().components);
   for (const actor of [OWNER, '4']) {
     const buttons = buttonsOf(actor);
-    assert.deepEqual(buttons.map((b) => b.label), ['Добавить', 'Убрать', 'Изменить имя', 'Добавить отчёт', 'Убрать отчёт']);
+    assert.deepEqual(buttons.map((b) => b.label), ['Добавить', 'Убрать', 'Изменить имя', 'Добавить отчёт', 'Убрать отчёт', 'Изменить отчёт', 'Профиль']);
     assert.deepEqual(buttons.map((b) => b.custom_id), Object.values(STAFF_BUTTONS));
   }
   assert.deepEqual(buttonsOf('6'), []); // ниже инструктора никого нет

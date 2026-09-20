@@ -10,6 +10,7 @@ import {
   TextInputStyle,
 } from 'discord.js';
 import { entryPoints, premiumEntries } from './forms.js';
+import { badIdMessage, parseUserId } from './manual.js';
 import { bonusInfo, formatMoney } from './parsing.js';
 
 const TTL_MS = 30 * 60 * 1000;
@@ -81,6 +82,8 @@ export function applyEdits({ check, report }, edits = {}) {
   }
   if (edits.points != null) c.points = edits.points;
   if (edits.reason != null) c.reason = edits.reason;
+  if (edits.userId != null) c.userId = edits.userId;
+  if (edits.accepted != null) c.accepted = edits.accepted; // смена статуса: принят <-> отказан
   return { check: c, report: r };
 }
 
@@ -135,21 +138,27 @@ export function previewFields({ check, report, others = [] }) {
 export function confirmMessage(token, data, others, prefix = '') {
   const { check, report } = applyEdits(data, data.edits);
   const { fields, warnings } = previewFields({ check, report, others });
+  const editing = data.mode === 'edit'; // правка уже сохранённого отчёта, а не новая проверка
   const embed = new EmbedBuilder()
-    .setTitle(`${prefix}Проверьте и подтвердите`)
-    .setDescription('Ничего не сохранено, пока вы не нажмёте «Сохранить».')
+    .setTitle(`${prefix}${editing ? 'Изменение отчёта: проверьте и подтвердите' : 'Проверьте и подтвердите'}`)
+    .setDescription(
+      editing
+        ? 'В отчёте ничего не меняется, пока вы не нажмёте «Сохранить».'
+        : 'Ничего не сохранено, пока вы не нажмёте «Сохранить».',
+    )
     .setColor(check.accepted ? 0x2ecc71 : 0xe74c3c)
     .addFields(fields);
   if (warnings.length) embed.addFields({ name: '⚠️ Проверьте', value: warnings.join('\n') });
 
   const button = (action, label, style) =>
     new ButtonBuilder().setCustomId(`${CONFIRM_PREFIX}${action}:${token}`).setLabel(label).setStyle(style);
-  const row = new ActionRowBuilder().addComponents(
+  const buttons = [
     button('save', '✅ Сохранить', ButtonStyle.Success),
     button('edit', '✏️ Изменить', ButtonStyle.Primary),
+    ...(editing ? [button('status', '🔄 Сменить статус', ButtonStyle.Secondary)] : []),
     button('cancel', '❌ Отменить', ButtonStyle.Danger),
-  );
-  return { embeds: [embed], components: [row] };
+  ];
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(buttons)] };
 }
 
 const input = (id, label, value, required = true) =>
@@ -167,15 +176,17 @@ const input = (id, label, value, required = true) =>
 export function editModal(token, data) {
   const { check, report } = applyEdits(data, data.edits);
   const modal = new ModalBuilder().setCustomId(`${CONFIRM_PREFIX}editmodal:${token}`).setTitle('Изменить данные');
+  const idField = input('user', 'ID человека, чей это отчёт', check.userId);
   if (check.accepted) {
     return modal.addComponents(
       input('name', 'Имя и фамилия', report?.name),
       input('points', 'Баллы (число)', entryPoints({ verdict: check, report })),
       input('rank', 'Ранг (число)', report?.rank ?? check.rank, false),
       input('position', 'Должность', report?.position ?? check.position, false),
+      idField,
     );
   }
-  return modal.addComponents(input('name', 'Имя и фамилия', report?.name), input('reason', 'Причина отказа', check.reason));
+  return modal.addComponents(input('name', 'Имя и фамилия', report?.name), input('reason', 'Причина отказа', check.reason), idField);
 }
 
 /** Значения из окна «Изменить» -> правки или ошибка (баллы и ранг — целые числа). */
@@ -184,6 +195,14 @@ export function parseEditFields(values, accepted) {
   const name = (values.name ?? '').trim();
   if (!name) return { error: 'Имя и фамилия не могут быть пустыми.' };
   patch.name = name;
+
+  // ID можно поправить, если в проверке указали не того человека; пустое поле — не менять.
+  const user = (values.user ?? '').trim();
+  if (user) {
+    const userId = parseUserId(user);
+    if (!userId) return { error: badIdMessage(user) };
+    patch.userId = userId;
+  }
 
   if (!accepted) {
     const reason = (values.reason ?? '').trim();

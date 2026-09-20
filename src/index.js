@@ -36,6 +36,7 @@ import { ActingFor } from './acting.js';
 import { BUILD } from './build.js';
 import { PendingChecks, applyEdits, confirmMessage, editModal, isConfirmId, parseConfirmId, parseEditFields } from './confirm.js';
 import { deliver, fail, say, sayError } from './deliver.js';
+import { commitEdit, findEditable } from './editflow.js';
 import { leadershipMessage, memoMessages, supportMessage, unregisteredMessage } from './memo.js';
 import {
   STAFF_BUTTONS,
@@ -49,6 +50,7 @@ import {
   staffModal,
 } from './staff.js';
 import { lookupMessages } from './lookup.js';
+import { PERIOD_CHOICES, profileMessages } from './profile.js';
 import { statsMessages } from './stats.js';
 import { Store } from './store.js';
 
@@ -306,6 +308,40 @@ const COMMANDS = {
     },
   },
 
+  'изменить': {
+    description: 'Изменить отчёт по ссылке: статус, баллы, имя, ранг, должность',
+    options: [textOption('ссылка', 'Ссылка на отчёт')],
+    run(userId, i) {
+      const started = startEdit(userId, i.options.getString('ссылка', true));
+      return [started.error ? fail(started.error) : started.card];
+    },
+  },
+
+  'профиль': {
+    description: 'Все отчёты человека за период: баллы, премия',
+    options: [
+      textOption('id', 'ID человека (числом или упоминанием)'),
+      {
+        name: 'период',
+        description: 'За какой период (по умолчанию месяц)',
+        type: ApplicationCommandOptionType.String,
+        required: false,
+        choices: PERIOD_CHOICES,
+      },
+    ],
+    run(userId, i) {
+      const raw = i.options.getString('id', true);
+      const target = parseUserId(raw);
+      if (!target) return [fail(badIdMessage(raw))];
+      return profileMessages({
+        stores: everyStore(),
+        userId: target,
+        period: i.options.getString('период') ?? 'month',
+        name: staff.nameOf(target),
+      });
+    },
+  },
+
   'проверить-наличие': {
     description: 'Проверить, есть ли отчёты: по именам и фамилиям или Discord ID',
     options: [textOption('список', 'Имена и фамилии или ID через запятую (можно несколько)')],
@@ -401,6 +437,13 @@ async function onPanelInteraction(interaction) {
     return replyHere(interaction, { content: removeReportFor(actorId, field('link')), allowedMentions: noPings });
   }
 
+  // «Изменить отчёт»: карточка с текущими данными приходит в личные сообщения.
+  if (kind === 'editReport') {
+    const started = startEdit(actorId, field('link'));
+    if (started.error) return denyPanel(interaction, started.error);
+    return sendToActor(interaction, [started.card]);
+  }
+
   const userId = parseUserId(field('user'));
   if (!userId) return denyPanel(interaction, badIdMessage(field('user')));
 
@@ -437,9 +480,29 @@ async function onPanelInteraction(interaction) {
           'Режим сбросится после записи пары «отчёт + проверка» или через 30 минут.',
         allowedMentions: noPings,
       });
+    case 'profile':
+      return sendToActor(interaction, profileMessages({ stores: everyStore(), userId, period: 'month', name: staff.nameOf(userId) }));
     default:
       return undefined;
   }
+}
+
+/**
+ * Ответ на кнопку панели, который приходит обычными сообщениями в личку: окно закрывается без ответа на него,
+ * а если личка закрыта, показывается на месте и виден только вам.
+ */
+async function sendToActor(interaction, messages) {
+  const payloads = messages.map((m) => ({ ...(typeof m === 'string' ? { content: m } : m), allowedMentions: noPings }));
+  if (interaction.isFromMessage()) await interaction.deferUpdate();
+  else await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  try {
+    for (const payload of payloads) await interaction.user.send(payload);
+  } catch {
+    for (const payload of payloads) await interaction.followUp({ ...payload, flags: MessageFlags.Ephemeral });
+    return undefined;
+  }
+  if (!interaction.isFromMessage()) await interaction.deleteReply().catch(() => {});
+  return undefined;
 }
 
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -502,8 +565,8 @@ function workingStore(actorId) {
 const prefixFor = (actorId, ownerId) => (ownerId === actorId ? '' : `За <@${ownerId}>: `);
 
 /** Уже сохранённые отчёты этого человека у всех проверяющих: нужны, чтобы сказать, пойдёт ли новый в премию. */
-const othersOf = (userId) =>
-  everyStore().flatMap(({ store }) => store.entries().filter((e) => e.verdict.userId === userId));
+const othersOf = (userId, exceptMessageId) =>
+  everyStore().flatMap(({ store }) => store.entries().filter((e) => e.verdict.userId === userId && e.messageId !== exceptMessageId));
 
 /**
  * Проверка пришла: ничего не записываем, а показываем карточку с данными и кнопками
@@ -532,7 +595,7 @@ async function handleCheck(message, check, text) {
 
   const token = pendingChecks.add(actorId, { ownerId, reportId, check, report: store.report(reportId) });
   const { data } = pendingChecks.peek(token, actorId);
-  return say(message, confirmMessage(token, data, othersOf(check.userId), prefix));
+  return say(message, renderCard(token, data, actorId));
 }
 
 /** Запись проверки после «Сохранить». Возвращает { entry } или { error }. */
@@ -563,7 +626,7 @@ function commitCheck({ ownerId, reportId, check: rawCheck, report: rawReport, ed
   return { entry: store.entry(check.messageId) };
 }
 
-/** Кнопки и окно карточки подтверждения: «Сохранить», «Изменить», «Отменить». */
+/** Кнопки и окно карточки подтверждения: «Сохранить», «Изменить», «Сменить статус» (правка отчёта), «Отменить». */
 async function onConfirmInteraction(interaction) {
   const { action, token } = parseConfirmId(interaction.customId);
   const actorId = interaction.user.id;
@@ -573,7 +636,8 @@ async function onConfirmInteraction(interaction) {
 
   if (action === 'cancel') {
     const taken = pendingChecks.take(token, actorId);
-    return taken.error ? fail(taken) : stop('Отменено. Ничего не сохранено.');
+    if (taken.error) return fail(taken);
+    return stop(taken.data.mode === 'edit' ? 'Отменено. Отчёт не изменён.' : 'Отменено. Ничего не сохранено.');
   }
 
   if (action === 'edit') {
@@ -581,30 +645,79 @@ async function onConfirmInteraction(interaction) {
     return found.error ? fail(found) : interaction.showModal(editModal(token, found.data));
   }
 
+  if (action === 'status') {
+    const found = pendingChecks.peek(token, actorId);
+    if (found.error) return fail(found);
+    const { check } = applyEdits(found.data, found.data.edits);
+    const { data } = pendingChecks.edit(token, actorId, { accepted: !check.accepted });
+    return interaction.update(renderCard(token, data, actorId));
+  }
+
   if (action === 'editmodal') {
     const found = pendingChecks.peek(token, actorId);
     if (found.error) return fail(found);
     const has = (id) => interaction.fields.fields.has(id);
     const value = (id) => (has(id) ? interaction.fields.getTextInputValue(id) : undefined);
+    const { check } = applyEdits(found.data, found.data.edits);
     const parsed = parseEditFields(
-      { name: value('name'), points: value('points'), rank: value('rank'), position: value('position'), reason: value('reason') },
-      found.data.check.accepted,
+      {
+        name: value('name'),
+        points: value('points'),
+        rank: value('rank'),
+        position: value('position'),
+        reason: value('reason'),
+        user: value('user'),
+      },
+      check.accepted,
     );
     if (parsed.error) return replyHere(interaction, { content: parsed.error });
     const { data } = pendingChecks.edit(token, actorId, parsed.patch);
-    return interaction.update(confirmMessage(token, data, othersOf(data.check.userId), prefixFor(actorId, data.ownerId)));
+    return interaction.update(renderCard(token, data, actorId));
   }
 
   if (action === 'save') {
     const taken = pendingChecks.take(token, actorId);
     if (taken.error) return fail(taken);
-    const result = commitCheck(taken.data);
+    const editing = taken.data.mode === 'edit';
+    const result = editing ? commitEdit(storeFor(taken.data.ownerId), taken.data) : commitCheck(taken.data);
     if (result.error) return stop(result.error);
-    if (actingFor.get(actorId) === taken.data.ownerId) actingFor.clear(actorId); // режим «за другого» одноразовый
-    return stop(`${prefixFor(actorId, taken.data.ownerId)}✅ Сохранено. ${describe(result.entry)}`);
+    if (!editing && actingFor.get(actorId) === taken.data.ownerId) actingFor.clear(actorId); // режим «за другого» одноразовый
+    return stop(`${prefixFor(actorId, taken.data.ownerId)}✅ ${editing ? 'Изменено' : 'Сохранено'}. ${describe(result.entry)}`);
   }
   return undefined;
 }
+
+/** Карточка подтверждения с учётом правок: чужие отчёты этого человека нужны, чтобы сказать, пойдёт ли отчёт в премию. */
+function renderCard(token, data, actorId) {
+  const { check } = applyEdits(data, data.edits);
+  return confirmMessage(token, data, othersOf(check.userId, check.messageId), prefixFor(actorId, data.ownerId));
+}
+
+/**
+ * Начало правки сохранённого отчёта по ссылке: находит его, проверяет права и возвращает карточку с текущими данными.
+ * Возвращает { card } или { error }. Ничего не меняется, пока не нажато «Сохранить».
+ */
+function startEdit(actorId, linkText) {
+  const found = findEditable({
+    stores: everyStore(),
+    actorId,
+    linkText,
+    outranks: (actor, checker) => staff.outranks(actor, checker),
+  });
+  if (found.error) return { error: found.error };
+
+  const { checkerId, entry, messageId } = found;
+  const data = {
+    mode: 'edit',
+    ownerId: checkerId,
+    reportId: messageId,
+    check: { ...entry.verdict, messageId },
+    report: entry.report,
+  };
+  const token = pendingChecks.add(actorId, data);
+  return { card: renderCard(token, pendingChecks.peek(token, actorId).data, actorId) };
+}
+
 
 function describe({ verdict, report }) {
   const name = report?.name ?? '???';

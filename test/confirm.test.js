@@ -144,8 +144,8 @@ test('кнопки: сохранить, изменить, отменить с о
 test('окно «Изменить»: поля заполнены текущими значениями', () => {
   const values = (data) => editModal('t', data).toJSON().components.map((row) => [row.components[0].custom_id, row.components[0].value]);
   const accepted = { check: parseCheck(ACCEPTED_TEXT), report: REPORT, edits: {} };
-  assert.deepEqual(values(accepted), [['name', 'Matvey_Siberyak'], ['points', '90'], ['rank', '12'], ['position', 'Delta']]);
-  assert.deepEqual(values({ check: parseCheck(REJECTED_TEXT), report: REPORT, edits: {} }), [['name', 'Matvey_Siberyak'], ['reason', 'Нет скриншотов']]);
+  assert.deepEqual(values(accepted), [['name', 'Matvey_Siberyak'], ['points', '90'], ['rank', '12'], ['position', 'Delta'], ['user', USER]]);
+  assert.deepEqual(values({ check: parseCheck(REJECTED_TEXT), report: REPORT, edits: {} }), [['name', 'Matvey_Siberyak'], ['reason', 'Нет скриншотов'], ['user', USER]]);
   assert.equal(editModal('t', accepted).toJSON().custom_id, 'confirm:editmodal:t');
 });
 
