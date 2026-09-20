@@ -85,6 +85,7 @@ export function formRows(entries) {
 }
 
 const CAPACITY = LIMIT - 8; // минус «```\n» и «\n```»
+const SEPARATOR = '-'.repeat(36); // линия между проверяющими в общем отчёте
 
 const COLUMNS = {
   accepted: '-# Упоминание | Имя Фамилия(В отчёте) | Ссылка на отчёт | Баллы',
@@ -126,8 +127,10 @@ export function buildForms(groups, wrap = code) {
   const premium = premiumRows(groups.flatMap((g) => g.entries));
 
   const messages = [];
-  for (const r of rows) {
-    messages.push(wrap(`**Проверил:** <@${r.checkerId}>`));
+  for (const [i, r] of rows.entries()) {
+    // Начиная со второго проверяющего перед «Проверил» ставится длинная линия из тире, чтобы блоки не сливались.
+    const head = `**Проверил:** <@${r.checkerId}>`;
+    messages.push(wrap(i > 0 ? `${SEPARATOR}\n${head}` : head));
     messages.push(...section(['**:white_check_mark: Принятые отчёты:**', COLUMNS.accepted], r.accepted, wrap));
     messages.push(...section(['**:x: Отказанные отчёты:**', COLUMNS.rejected], r.rejected, wrap));
   }

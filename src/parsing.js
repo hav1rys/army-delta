@@ -2,22 +2,28 @@
 
 const LINK_RE = /https?:\/\/(?:\w+\.)?discord(?:app)?\.com\/channels\/(\d+)\/(\d+)\/(\d+)/;
 
-// Таблица премий: [от, до, тип]. Всё, что больше последней границы — «Сверхвысокая».
+// Таблица премий: [от, до, тип, размер в долларах]. Всё, что больше последней границы — «Сверхвысокая».
 const BONUS_TIERS = [
-  [10, 25, 'Пониженная'],
-  [26, 50, 'Стандарт'],
-  [51, 100, 'Средняя'],
-  [101, 200, 'Высокая'],
-  [201, 450, 'Повышенная'],
+  [10, 25, 'Пониженная', 25000],
+  [26, 50, 'Стандарт', 45000],
+  [51, 100, 'Средняя', 70000],
+  [101, 200, 'Высокая', 80000],
+  [201, 450, 'Повышенная', 95000],
 ];
-const BONUS_TOP = 'Сверхвысокая';
+const BONUS_TOP = { type: 'Сверхвысокая', amount: 130000 };
 
-export function bonusType(points) {
+/** Тип и размер премии по баллам, или null, если баллов нет или их меньше 10. */
+export function bonusInfo(points) {
   if (!Number.isFinite(points)) return null;
   if (points > BONUS_TIERS.at(-1)[1]) return BONUS_TOP;
   const tier = BONUS_TIERS.find(([lo, hi]) => points >= lo && points <= hi);
-  return tier ? tier[2] : null;
+  return tier ? { type: tier[2], amount: tier[3] } : null;
 }
+
+export const bonusType = (points) => bonusInfo(points)?.type ?? null;
+
+/** 80000 -> «80 000$». */
+export const formatMoney = (amount) => `${String(amount).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')}$`;
 
 const stripMarkdown = (s) => s.replace(/[*`]/g, '').trim();
 

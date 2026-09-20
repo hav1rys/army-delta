@@ -34,6 +34,7 @@ import {
 } from './manual.js';
 import { ActingFor } from './acting.js';
 import { BUILD } from './build.js';
+import { PendingChecks, applyEdits, confirmMessage, editModal, isConfirmId, parseConfirmId, parseEditFields } from './confirm.js';
 import { deliver, say } from './deliver.js';
 import { leadershipMessage, memoMessages, unregisteredMessage } from './memo.js';
 import {
@@ -67,6 +68,7 @@ const allowedUsers = new Set(ALLOWED_USER_IDS.split(',').map((s) => s.trim()).fi
 const staff = new Staff(path.join(DATA_DIR, 'staff.json'), OWNER_USER_ID);
 
 const actingFor = new ActingFor();
+const pendingChecks = new PendingChecks();
 
 const isOwner = (userId) => staff.isOwner(userId);
 /** Старший состав: владелец и все ранги выше инструктора. */
@@ -426,7 +428,8 @@ async function onPanelInteraction(interaction) {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isButton() || interaction.isModalSubmit()) {
-    const handler = isStaffInteractionId(interaction.customId) ? onPanelInteraction : null;
+    const id = interaction.customId;
+    const handler = isStaffInteractionId(id) ? onPanelInteraction : isConfirmId(id) ? onConfirmInteraction : null;
     handler?.(interaction).catch((err) => console.error('Ошибка панели:', err));
     return;
   }
@@ -472,14 +475,27 @@ async function handleReport(message, report, { snapshot, text }) {
   return say(message, `${prefix}🔗 ${describe(store.entry(ref.messageId))}`);
 }
 
-/** Чей список пополняем: свой или (после «Добавить отчёт инструктору») список выбранного инструктора. */
+/** Чей список пополняем: свой или (после «Добавить отчёт») список выбранного человека. ownerId — чей это список. */
 function workingStore(actorId) {
   const targetId = actingFor.get(actorId);
-  return targetId ? { store: storeFor(targetId), prefix: `За <@${targetId}>: ` } : { store: storeFor(actorId), prefix: '' };
+  return targetId
+    ? { store: storeFor(targetId), ownerId: targetId, prefix: `За <@${targetId}>: ` }
+    : { store: storeFor(actorId), ownerId: actorId, prefix: '' };
 }
 
+const prefixFor = (actorId, ownerId) => (ownerId === actorId ? '' : `За <@${ownerId}>: `);
+
+/** Уже сохранённые отчёты этого человека у всех проверяющих: нужны, чтобы сказать, пойдёт ли новый в премию. */
+const othersOf = (userId) =>
+  everyStore().flatMap(({ store }) => store.entries().filter((e) => e.verdict.userId === userId));
+
+/**
+ * Проверка пришла: ничего не записываем, а показываем карточку с данными и кнопками
+ * «Сохранить», «Изменить», «Отменить». Без найденного отчёта карточки нет: одна ссылка отчётом не становится.
+ */
 async function handleCheck(message, check, text) {
-  const { store, prefix } = workingStore(message.author.id);
+  const actorId = message.author.id;
+  const { store, ownerId, prefix } = workingStore(actorId);
 
   // Одна ссылка — один отчёт (у человека отчётов может быть сколько угодно).
   const dup = findDuplicate(everyStore(), check.messageId);
@@ -487,14 +503,37 @@ async function handleCheck(message, check, text) {
 
   // Ссылка в формах берётся из проверки. Но id пересланного отчёта не всегда совпадает с id из этой ссылки,
   // тогда отчёт ищем среди ещё не проверенных: по имени в нике, иначе единственный.
-  if (!store.report(check.messageId)) {
-    const match = matchPendingReport(store.pendingReports(), text);
-    if (match) {
-      console.log(`Отчёт привязан к проверке без совпадения id: ${match.messageId} → ${check.messageId}`);
-      store.moveReport(match.messageId, check.messageId);
-    }
+  let reportId = store.report(check.messageId) ? check.messageId : null;
+  if (!reportId) reportId = matchPendingReport(store.pendingReports(), text)?.messageId ?? null;
+
+  if (!reportId) {
+    const waiting = store.pendingReports().map(({ report }) => report.name);
+    const hint = waiting.length
+      ? `Ждут проверки: ${waiting.join(', ')}, но в проверке нет имени, чтобы выбрать нужный. Отправьте проверку сразу после его отчёта.`
+      : 'Сначала перешлите отчёт, потом отправьте проверку.';
+    return say(message, `${prefix}Не нашёл отчёт для этой проверки, ничего не сохранил. ${hint}`);
   }
 
+  const token = pendingChecks.add(actorId, { ownerId, reportId, check, report: store.report(reportId) });
+  const { data } = pendingChecks.peek(token, actorId);
+  return say(message, confirmMessage(token, data, othersOf(check.userId), prefix));
+}
+
+/** Запись проверки после «Сохранить». Возвращает { entry } или { error }. */
+function commitCheck({ ownerId, reportId, check: rawCheck, report: rawReport, edits }) {
+  const { check, report } = applyEdits({ check: rawCheck, report: rawReport }, edits);
+  const dup = findDuplicate(everyStore(), check.messageId);
+  if (dup) return { error: duplicateMessage(dup) };
+
+  const store = storeFor(ownerId);
+  if (!store.report(reportId)) return { error: 'Отчёт уже удалён. Отправьте отчёт и проверку заново.' };
+  if (reportId !== check.messageId) store.moveReport(reportId, check.messageId);
+  store.setReport(check.messageId, {
+    ...store.report(check.messageId),
+    name: report.name,
+    rank: report.rank,
+    position: report.position,
+  });
   store.setVerdict(check.messageId, {
     userId: check.userId,
     rank: check.rank,
@@ -505,16 +544,50 @@ async function handleCheck(message, check, text) {
     reason: check.reason,
     link: check.link,
   });
-  const entry = store.entry(check.messageId);
-  if (!entry.report) {
-    const waiting = store.pendingReports().map(({ report }) => report.name);
-    const hint = waiting.length
-      ? `Ждут проверки: ${waiting.join(', ')}, но в проверке нет имени, чтобы выбрать нужный. Отправьте проверку сразу после его отчёта.`
-      : 'Сначала перешлите отчёт, потом отправьте проверку.';
-    return say(message, `${prefix}Проверка сохранена, но отчёта для неё нет. ${hint}`);
+  return { entry: store.entry(check.messageId) };
+}
+
+/** Кнопки и окно карточки подтверждения: «Сохранить», «Изменить», «Отменить». */
+async function onConfirmInteraction(interaction) {
+  const { action, token } = parseConfirmId(interaction.customId);
+  const actorId = interaction.user.id;
+  const stop = (text) => interaction.update({ content: text, embeds: [], components: [] });
+  // Чужое нажатие ничего не меняет в карточке; устаревшая карточка заменяется текстом.
+  const fail = (result) => (result.foreign ? replyHere(interaction, { content: result.error }) : stop(result.error));
+
+  if (action === 'cancel') {
+    const taken = pendingChecks.take(token, actorId);
+    return taken.error ? fail(taken) : stop('Отменено. Ничего не сохранено.');
   }
-  actingFor.clear(message.author.id); // пара «отчёт + проверка» записана: режим «за инструктора» одноразовый
-  return say(message, `${prefix}${describe(entry)}`);
+
+  if (action === 'edit') {
+    const found = pendingChecks.peek(token, actorId);
+    return found.error ? fail(found) : interaction.showModal(editModal(token, found.data));
+  }
+
+  if (action === 'editmodal') {
+    const found = pendingChecks.peek(token, actorId);
+    if (found.error) return fail(found);
+    const has = (id) => interaction.fields.fields.has(id);
+    const value = (id) => (has(id) ? interaction.fields.getTextInputValue(id) : undefined);
+    const parsed = parseEditFields(
+      { name: value('name'), points: value('points'), rank: value('rank'), position: value('position'), reason: value('reason') },
+      found.data.check.accepted,
+    );
+    if (parsed.error) return replyHere(interaction, { content: parsed.error });
+    const { data } = pendingChecks.edit(token, actorId, parsed.patch);
+    return interaction.update(confirmMessage(token, data, othersOf(data.check.userId), prefixFor(actorId, data.ownerId)));
+  }
+
+  if (action === 'save') {
+    const taken = pendingChecks.take(token, actorId);
+    if (taken.error) return fail(taken);
+    const result = commitCheck(taken.data);
+    if (result.error) return stop(result.error);
+    if (actingFor.get(actorId) === taken.data.ownerId) actingFor.clear(actorId); // режим «за другого» одноразовый
+    return stop(`${prefixFor(actorId, taken.data.ownerId)}✅ Сохранено. ${describe(result.entry)}`);
+  }
+  return undefined;
 }
 
 function describe({ verdict, report }) {

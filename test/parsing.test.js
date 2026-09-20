@@ -346,3 +346,27 @@ test('формы: длинный список делится на сообщен
   assert.ok(parts.length > 3);
   assert.ok(parts.every((m) => m.length <= 2000));
 });
+
+test('общий отчёт: перед «Проверил» линия из тире, начиная со второго проверяющего', () => {
+  const report = { name: 'Name Surname', rank: '12', position: 'Delta', total: 100 };
+  const entry = (id, user) => ({ messageId: id, verdict: { ...parseCheck(ACCEPTED), userId: user, link: `${LINK}${id}` }, report });
+  const dashes = '-'.repeat(36);
+  const parts = buildForms(
+    [
+      { checkerId: '111', entries: [entry('1', '10')] },
+      { checkerId: '222', entries: [entry('2', '20')] },
+      { checkerId: '333', entries: [entry('3', '30')] },
+    ],
+    (text) => text, // общий отчёт идёт обычным текстом
+  );
+  const heads = parts.filter((m) => m.includes('**Проверил:**'));
+  assert.equal(heads.length, 3);
+  assert.equal(heads[0], '**Проверил:** <@111>'); // у первого линии нет
+  assert.equal(heads[1], `${dashes}\n**Проверил:** <@222>`);
+  assert.equal(heads[2], `${dashes}\n**Проверил:** <@333>`);
+  assert.equal(dashes.length, 36);
+
+  // у одного проверяющего (/отчет) линии нет
+  const single = buildForms([{ checkerId: '111', entries: [entry('1', '10')] }]).join('\n');
+  assert.doesNotMatch(single, /-{20}/);
+});

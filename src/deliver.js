@@ -54,9 +54,10 @@ export async function deliver(interaction, messages) {
  * автору; при закрытой личке в канале остаётся одна короткая просьба открыть её, без данных.
  */
 export async function say(message, content) {
-  if (message.guildId === null) return message.channel.send({ content, allowedMentions: noPings });
+  const payload = toPayload(content); // строка или готовое содержимое ({ embeds, components })
+  if (message.guildId === null) return message.channel.send(payload);
   try {
-    await message.author.send({ content, allowedMentions: noPings });
+    await message.author.send(payload);
   } catch {
     await message.reply({
       content: 'Не могу написать вам в личные сообщения. Откройте личку с ботом, и я отвечу там.',
