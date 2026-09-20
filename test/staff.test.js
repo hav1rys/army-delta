@@ -3,116 +3,127 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { leadershipMessage, memoMessages, unregisteredMessage } from '../src/memo.js';
 import { ActingFor } from '../src/acting.js';
-import {
-  INSTRUCTOR_BUTTONS,
-  INSTRUCTOR_MODALS,
-  STAFF_ROLES,
-  Staff,
-  addModal,
-  instructorModal,
-  instructorPanelMessage,
-  isInstructorInteractionId,
-  nameModal,
-  panelMessage,
-  roleByKey,
-} from '../src/staff.js';
+import { addAccepted, removeByLinkAllowed } from '../src/manual.js';
+import { leadershipMessage, memoMessages, unregisteredMessage } from '../src/memo.js';
+import { STAFF_BUTTONS, STAFF_MODALS, STAFF_ROLES, Staff, panelMessage, roleByRank, roleTitle, staffModal } from '../src/staff.js';
 import { statsMessages } from '../src/stats.js';
+import { Store } from '../src/store.js';
 
 const OWNER = '900';
-const tempFile = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'staff-')), 'staff.json');
+const tempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'staff-'));
+const tempFile = () => path.join(tempDir(), 'staff.json');
 const tempStaff = () => new Staff(tempFile(), OWNER);
 
-test('уровни сверху вниз', () => {
+test('ранги: числа от 6 до 1, сверху вниз', () => {
   assert.deepEqual(
-    STAFF_ROLES.map((r) => r.label),
-    ['Генерал армии', 'Заместитель армии', 'Куратор отдела', 'Начальник отдела', 'Заместитель начальника отдела', 'Инструктор'],
+    STAFF_ROLES.map((r) => `${r.label} ${r.rank}`),
+    [
+      'Генерал армии 6',
+      'Заместитель армии 5',
+      'Куратор отдела 4',
+      'Начальник отдела 3',
+      'Заместитель начальника отдела 2',
+      'Инструктор 1',
+    ],
   );
+  assert.equal(roleByRank(5).key, 'army-deputy');
+  assert.equal(roleByRank(7), null);
+  assert.equal(roleTitle(roleByRank(6)), '[6] Генерал армии');
 });
 
-test('владелец добавляет кого угодно, в любой уровень', () => {
+test('владелец добавляет кого угодно на любой ранг', () => {
   const staff = tempStaff();
   assert.equal(staff.assignableRoles(OWNER).length, 6);
   assert.equal(staff.canAssign(OWNER, 'general', '1'), true);
   staff.add('general', '1');
-  assert.equal(staff.canAssign(OWNER, 'instructor', '1'), true); // владелец может и переназначить генерала
+  assert.equal(staff.canAssign(OWNER, 'instructor', '1'), true); // и переназначить генерала
 });
 
-test('каждый добавляет только тех, кто строго ниже него', () => {
+test('каждый добавляет только на ранги ниже своего', () => {
+  const staff = tempStaff();
+  staff.add('general', '1');
+  staff.add('army-deputy', '2');
+  staff.add('instructor', '6');
+
+  assert.deepEqual(staff.assignableRoles('1').map((r) => r.rank), [5, 4, 3, 2, 1]);
+  assert.equal(staff.canAssign('1', 'general', '10'), false); // на такой же ранг нельзя
+  assert.equal(staff.canAssign('1', 'army-deputy', '10'), true);
+
+  assert.deepEqual(staff.assignableRoles('2').map((r) => r.rank), [4, 3, 2, 1]);
+  assert.equal(staff.canAssign('2', 'army-deputy', '10'), false);
+  assert.equal(staff.canAssign('2', 'curator', '10'), true);
+
+  // инструктор и человек вне системы не добавляют никого
+  assert.deepEqual(staff.assignableRoles('6'), []);
+  assert.deepEqual(staff.assignableRoles('777'), []);
+  assert.equal(staff.canAssign('6', 'instructor', '10'), false);
+});
+
+test('нельзя тронуть того, кто выше или наравне: ни переместить, ни убрать, ни поменять имя', () => {
   const staff = tempStaff();
   staff.add('general', '1');
   staff.add('army-deputy', '2');
   staff.add('curator', '3');
   staff.add('instructor', '6');
 
-  // генерал армии: заместителя армии и ниже, но не такого же генерала
-  assert.deepEqual(staff.assignableRoles('1').map((r) => r.key), ['army-deputy', 'curator', 'head', 'deputy', 'instructor']);
-  assert.equal(staff.canAssign('1', 'general', '10'), false);
-  assert.equal(staff.canAssign('1', 'army-deputy', '10'), true);
-
-  // заместитель армии: куратора и ниже
-  assert.deepEqual(staff.assignableRoles('2').map((r) => r.key), ['curator', 'head', 'deputy', 'instructor']);
-  assert.equal(staff.canAssign('2', 'army-deputy', '10'), false);
-  assert.equal(staff.canAssign('2', 'curator', '10'), true);
-
-  // инструктор не добавляет никого, человек вне системы — тоже
-  assert.deepEqual(staff.assignableRoles('6'), []);
-  assert.deepEqual(staff.assignableRoles('777'), []);
-  assert.equal(staff.canAssign('6', 'instructor', '10'), false);
-});
-
-test('нельзя тронуть того, кто выше или наравне: ни переназначить, ни поменять имя', () => {
-  const staff = tempStaff();
-  staff.add('general', '1');
-  staff.add('army-deputy', '2');
-  staff.add('curator', '3');
-
   assert.equal(staff.canAssign('3', 'instructor', '2'), false); // куратор не разжалует заместителя армии
-  assert.equal(staff.canAssign('2', 'instructor', '1'), false); // и заместитель — генерала
+  assert.equal(staff.canAssign('2', 'instructor', '1'), false);
   assert.equal(staff.canAssign('2', 'instructor', '2'), false); // и себя
   assert.equal(staff.canEdit('3', '2'), false);
   assert.equal(staff.canEdit('3', '3'), false);
-  assert.equal(staff.canEdit('2', '3'), true); // выше — можно
-  assert.equal(staff.canEdit('2', '999'), false); // такого человека нет
+  assert.equal(staff.canEdit('2', '3'), true); // ниже: можно
+  assert.equal(staff.canEdit('6', '6'), false); // инструктор наравне с собой
+  assert.equal(staff.canEdit('2', '999'), false); // такого человека нет в списке
+  assert.equal(staff.canEdit(OWNER, '999'), false); // и владельцу нечего убирать
+
+  assert.equal(staff.outranks('2', '3'), true);
+  assert.equal(staff.outranks('6', '2'), false);
+  assert.equal(staff.outranks('2', '999'), false); // не в списке: не ниже
+  assert.equal(staff.outranks(OWNER, '999'), true); // кроме владельца
 });
 
-test('человек состоит в одном уровне: повторное добавление переносит его', () => {
+test('кто уже в списке, переносится на новый ранг, дубля нет', () => {
   const staff = tempStaff();
   assert.equal(staff.add('instructor', '5', '[Инст.Delta] Иван Петров'), 'added');
-  assert.equal(staff.add('deputy', '5'), 'moved');
+  assert.equal(staff.add('deputy', '5', '[Зам.Delta] Иван Петров'), 'moved');
   assert.equal(staff.roleKeyOf('5'), 'deputy');
   assert.deepEqual(staff.members('instructor'), []);
+  assert.deepEqual(staff.everyone(), ['5']);
 });
 
-test('имя и фамилия: записывается при добавлении и меняется потом', () => {
+test('убрать человека, имя и фамилия', () => {
   const staff = tempStaff();
   staff.add('instructor', '5', '  [Инст.Delta] Иван Петров ');
   assert.equal(staff.nameOf('5'), '[Инст.Delta] Иван Петров');
   assert.equal(staff.setName('5', '[Инст.Delta] Пётр Иванов'), true);
   assert.equal(staff.nameOf('5'), '[Инст.Delta] Пётр Иванов');
   assert.equal(staff.setName('404', 'x'), false);
+
+  assert.equal(staff.remove('5'), true);
+  assert.equal(staff.remove('5'), false);
+  assert.equal(staff.has('5'), false);
 });
 
-test('руководство — все, кроме инструкторов', () => {
+test('старший состав: всё выше инструктора', () => {
   const staff = tempStaff();
   staff.add('curator', '3');
   staff.add('instructor', '6');
   assert.equal(staff.isManager('3'), true);
   assert.equal(staff.isManager('6'), false);
+  assert.equal(staff.isManager('999'), false);
   assert.equal(staff.has('6'), true);
   assert.equal(staff.rolesOf('6'), 'Инструктор');
   assert.deepEqual(staff.everyone().sort(), ['3', '6']);
 });
 
-test('сохранение на диск и прежние названия уровней', () => {
+test('сохранение на диск и прежние названия', () => {
   const file = tempFile();
   new Staff(file, OWNER).add('army-deputy', '2', 'Имя Фамилия');
   const again = new Staff(file, OWNER);
   assert.equal(again.roleKeyOf('2'), 'army-deputy');
   assert.equal(again.nameOf('2'), 'Имя Фамилия');
 
-  // файл со старыми названиями и без имён
   const legacy = tempFile();
   fs.writeFileSync(legacy, JSON.stringify({ 'senior-admin': ['1'], admin: ['2'], 'senior-staff': ['3'] }));
   const migrated = new Staff(legacy, OWNER);
@@ -121,123 +132,104 @@ test('сохранение на диск и прежние названия ур
   assert.equal(migrated.roleKeyOf('3'), 'instructor');
 });
 
-test('панель старшего состава: без инструкторов, кнопки только на доступные уровни', () => {
+test('панель: все шесть рангов с числами, инструкторы тоже здесь', () => {
   const staff = tempStaff();
-  staff.add('general', '1');
   staff.add('deputy', '4', '[Зам.Delta] Иван Петров');
   staff.add('instructor', '6', '[Инст.Delta] Пётр Иванов');
 
-  const forOwner = panelMessage(staff, OWNER);
-  const fields = forOwner.embeds[0].toJSON().fields;
-  assert.equal(fields.length, 5); // инструкторов в этой панели нет
-  assert.ok(!fields.some((f) => f.name === 'Инструктор'));
-  assert.equal(fields.find((f) => f.name === 'Заместитель начальника отдела').value, '<@4> | [Зам.Delta] Иван Петров');
-  assert.equal(fields.find((f) => f.name === 'Куратор отдела').value, '—');
-
-  const buttonsOf = (message) => message.components.flatMap((row) => row.toJSON().components);
-  assert.equal(buttonsOf(forOwner).length, 6); // 5 уровней + «Изменить имя»
-  assert.ok(!buttonsOf(forOwner).some((b) => b.custom_id === 'staff:add:instructor'));
-
-  const forGeneral = buttonsOf(panelMessage(staff, '1'));
-  assert.equal(forGeneral.length, 5); // 4 уровня ниже, кроме инструктора, + «Изменить имя»
-  assert.ok(!forGeneral.some((b) => b.custom_id === 'staff:add:general'));
-
-  // заместителю начальника отдела добавлять из старшего состава уже некого
-  assert.deepEqual(panelMessage(staff, '4').components, []);
-  assert.deepEqual(panelMessage(staff, '999').components, []); // не в системе: кнопок нет
-  assert.ok(buttonsOf(forOwner).every((b) => b.label.length <= 80));
+  const fields = panelMessage(staff, OWNER).embeds[0].toJSON().fields;
+  assert.deepEqual(
+    fields.map((f) => f.name),
+    [
+      '[6] Генерал армии',
+      '[5] Заместитель армии',
+      '[4] Куратор отдела',
+      '[3] Начальник отдела',
+      '[2] Заместитель начальника отдела',
+      '[1] Инструктор',
+    ],
+  );
+  assert.equal(fields[4].value, '<@4> | [Зам.Delta] Иван Петров');
+  assert.equal(fields[5].value, '<@6> | [Инст.Delta] Пётр Иванов');
+  assert.equal(fields[0].value, '—');
 });
 
-test('/старший-состав и /инструктор: кто что может', () => {
+test('панель: пять кнопок у тех, у кого есть кто-то ниже; у инструктора кнопок нет', () => {
   const staff = tempStaff();
-  staff.add('general', '1');
   staff.add('deputy', '4');
   staff.add('instructor', '6');
 
-  assert.equal(staff.assignableSeniorRoles(OWNER).length, 5);
-  assert.equal(staff.assignableSeniorRoles('4').length, 0); // зам. начальника: только инструкторов
-  assert.equal(staff.canManageInstructors(OWNER), true);
-  assert.equal(staff.canManageInstructors('1'), true);
-  assert.equal(staff.canManageInstructors('4'), true);
-  assert.equal(staff.canManageInstructors('6'), false); // инструктор инструкторов не ведёт
-  assert.equal(staff.canManageInstructors('999'), false);
+  const buttonsOf = (actor) => panelMessage(staff, actor).components.flatMap((row) => row.toJSON().components);
+  for (const actor of [OWNER, '4']) {
+    const buttons = buttonsOf(actor);
+    assert.deepEqual(buttons.map((b) => b.label), ['Добавить', 'Убрать', 'Изменить имя', 'Добавить отчёт', 'Убрать отчёт']);
+    assert.deepEqual(buttons.map((b) => b.custom_id), Object.values(STAFF_BUTTONS));
+  }
+  assert.deepEqual(buttonsOf('6'), []); // ниже инструктора никого нет
+  assert.deepEqual(buttonsOf('999'), []);
 });
 
-test('инструкторы: добавить, убрать, повторное добавление меняет имя', () => {
-  const staff = tempStaff();
-  assert.equal(staff.canAssign('4', 'instructor', '6'), false); // «4» ещё не в системе: добавлять не может
-  staff.add('deputy', '4');
-  assert.equal(staff.canAssign('4', 'instructor', '6'), true);
-
-  staff.add('instructor', '6', '[Инст.Delta] Иван Петров');
-  assert.equal(staff.isInstructor('6'), true);
-  assert.deepEqual(staff.instructors().map((m) => m.id), ['6']);
-
-  staff.add('instructor', '6', '[Инст.Delta] Иван Сидоров'); // повторно: имя обновилось, дубля нет
-  assert.equal(staff.instructors().length, 1);
-  assert.equal(staff.nameOf('6'), '[Инст.Delta] Иван Сидоров');
-
-  assert.equal(staff.removeInstructor('4'), false); // «4» не инструктор: убрать нельзя
-  assert.equal(staff.removeInstructor('6'), true);
-  assert.equal(staff.removeInstructor('6'), false);
-  assert.equal(staff.has('6'), false);
-});
-
-test('панель инструкторов: список, четыре кнопки, окна', () => {
-  const staff = tempStaff();
-  staff.add('instructor', '6', '[Инст.Delta] Иван Петров');
-  const { embeds, components } = instructorPanelMessage(staff);
-  assert.equal(embeds[0].toJSON().description, '<@6> | [Инст.Delta] Иван Петров');
-
-  const buttons = components[0].toJSON().components;
-  assert.deepEqual(
-    buttons.map((b) => b.label),
-    ['Добавить инструктора', 'Убрать инструктора', 'Добавить отчёт инструктору', 'Убрать отчёт инструктору'],
-  );
-  assert.deepEqual(buttons.map((b) => b.custom_id), Object.values(INSTRUCTOR_BUTTONS));
-
-  // окна: у «убрать отчёт» одна ссылка, у «добавить» ID и имя, у остальных ID
-  const fieldIds = (kind) => instructorModal(kind).toJSON().components.map((row) => row.components[0].custom_id);
-  assert.deepEqual(fieldIds('add'), ['user', 'name']);
-  assert.deepEqual(fieldIds('remove'), ['user']);
+test('окна: поля по сценарию «ранг, ID, имя» и «только ID»', () => {
+  const fieldIds = (kind) => staffModal(kind).toJSON().components.map((row) => row.components[0].custom_id);
+  assert.deepEqual(fieldIds('add'), ['rank', 'user', 'name']); // ранг первым, потом ID и имя
+  assert.deepEqual(fieldIds('remove'), ['user']); // увольнение без ранга
+  assert.deepEqual(fieldIds('name'), ['user', 'name']);
   assert.deepEqual(fieldIds('addReport'), ['user']);
   assert.deepEqual(fieldIds('removeReport'), ['link']);
-  for (const kind of Object.keys(INSTRUCTOR_BUTTONS)) {
-    assert.equal(instructorModal(kind).toJSON().custom_id, INSTRUCTOR_MODALS[kind]);
-    assert.ok(instructorModal(kind).toJSON().title.length <= 45);
-  }
-  assert.ok(isInstructorInteractionId('inst:add') && !isInstructorInteractionId('staff:add:head'));
-});
-
-test('режим «за инструктора»: одноразовый, с ограничением по времени', () => {
-  const acting = new ActingFor();
-  assert.equal(acting.get('1'), null);
-  acting.set('1', '6', 1000);
-  assert.equal(acting.get('1', 1000 + 29 * 60 * 1000), '6'); // в течение получаса
-  assert.equal(acting.get('1', 1000 + 31 * 60 * 1000), null); // потом сбрасывается
-  acting.set('1', '6', 1000);
-  acting.clear('1');
-  assert.equal(acting.get('1', 1001), null);
-  acting.set('1', '6', 1000);
-  acting.set('1', '7', 1000); // новый выбор заменяет старый
-  assert.equal(acting.get('1', 1001), '7');
-});
-
-test('окна: название влезает в лимит Discord (45 символов), поля на месте', () => {
-  for (const role of STAFF_ROLES) {
-    const modal = addModal(roleByKey(role.key)).toJSON();
+  for (const kind of Object.keys(STAFF_BUTTONS)) {
+    const modal = staffModal(kind).toJSON();
+    assert.equal(modal.custom_id, STAFF_MODALS[kind]);
     assert.ok(modal.title.length <= 45);
-    assert.equal(modal.components.length, 2); // ID и имя
   }
-  assert.equal(nameModal().toJSON().components.length, 2);
 });
 
 test('длинный список в эмбеде обрезается под лимит поля (1024)', () => {
   const staff = tempStaff();
   for (let i = 0; i < 80; i++) staff.add('instructor', String(100000000000000000n + BigInt(i)), '[Инст.Delta] Очень Длинное Имя Фамилия');
-  const value = instructorPanelMessage(staff).embeds[0].toJSON().description;
-  assert.ok(value.length <= 1024);
-  assert.match(value, /и ещё \d+$/);
+  const field = panelMessage(staff, OWNER).embeds[0].toJSON().fields.find((f) => f.name === '[1] Инструктор');
+  assert.ok(field.value.length <= 1024);
+  assert.match(field.value, /и ещё \d+$/);
+});
+
+test('удаление отчёта: свои и тех, кто ниже по рангу; чужой инструктор нельзя', () => {
+  const staff = tempStaff();
+  staff.add('curator', '3');
+  staff.add('instructor', '6');
+  staff.add('instructor', '7');
+
+  const link = 'https://discord.com/channels/713076174108229712/1027944923829383188/1548582679338024982';
+  const other = new Store(path.join(tempDir(), '7.json'));
+  const own = new Store(path.join(tempDir(), '6.json'));
+  const mine = new Store(path.join(tempDir(), '3.json'));
+  addAccepted(other, { id: '621978844894593026', name: 'A B', link, points: 60, rank: 12, position: 'Delta' });
+  const stores = [{ checkerId: '7', store: other }, { checkerId: '6', store: own }, { checkerId: '3', store: mine }];
+
+  // инструктор «6» не может удалить отчёт инструктора «7»
+  const canRemove6 = (c) => c === '6' || staff.outranks('6', c);
+  assert.deepEqual(removeByLinkAllowed(stores, link, canRemove6), { removed: [], denied: ['7'] });
+  assert.equal(other.entries().length, 1);
+
+  // куратор «3» выше инструктора: может
+  const canRemove3 = (c) => c === '3' || staff.outranks('3', c);
+  assert.deepEqual(removeByLinkAllowed(stores, link, canRemove3), { removed: [{ checkerId: '7', name: 'A B' }], denied: [] });
+  assert.equal(other.entries().length, 0);
+
+  assert.deepEqual(removeByLinkAllowed(stores, link, canRemove3), { removed: [], denied: [] }); // уже нет
+  assert.match(removeByLinkAllowed(stores, 'не ссылка', canRemove3).error, /ссылк/);
+});
+
+test('режим «за другого»: одноразовый, с ограничением по времени', () => {
+  const acting = new ActingFor();
+  assert.equal(acting.get('1'), null);
+  acting.set('1', '6', 1000);
+  assert.equal(acting.get('1', 1000 + 29 * 60 * 1000), '6');
+  assert.equal(acting.get('1', 1000 + 31 * 60 * 1000), null);
+  acting.set('1', '6', 1000);
+  acting.clear('1');
+  assert.equal(acting.get('1', 1001), null);
+  acting.set('1', '6', 1000);
+  acting.set('1', '7', 1000);
+  assert.equal(acting.get('1', 1001), '7');
 });
 
 test('помощь: незарегистрированным — обратитесь к старшему составу и ID', () => {
@@ -245,39 +237,25 @@ test('помощь: незарегистрированным — обратит�
   assert.match(text, /не зарегистрированы/);
   assert.match(text, /старшему составу/);
   assert.match(text, /123456789012345678/);
+  assert.doesNotMatch(text, /\/инструктор/); // такой команды больше нет
 });
 
-test('помощь для руководства: старший состав, инструкторы, отчёты', () => {
-  const text = leadershipMessage({
-    level: 'Генерал армии',
-    addable: ['Заместитель армии', 'Куратор отдела'],
-    canInstructors: true,
-    canReports: true,
-  });
+test('помощь для старшего состава: кнопки, кого можно, отчёты', () => {
+  const text = leadershipMessage({ level: '[6] Генерал армии', addable: ['[5] Заместитель армии', '[4] Куратор отдела'], canReports: true });
   assert.match(text, /Генерал армии/);
-  assert.match(text, /Заместитель армии, Куратор отдела/);
-  assert.match(text, /\/старший-состав/);
-  assert.match(text, /\/инструктор/);
-  assert.match(text, /Убрать отчёт инструктору/);
-  assert.match(text, /чужие не может/);
+  assert.match(text, /\[5\] Заместитель армии, \[4\] Куратор отдела/);
+  for (const button of ['Добавить', 'Убрать', 'Изменить имя', 'Добавить отчёт', 'Убрать отчёт']) assert.match(text, new RegExp(`«${button}»`));
+  assert.match(text, /переносится на новый ранг/);
   assert.match(text, /\/общий-отчет/);
+  assert.doesNotMatch(text, /\/инструктор/);
 
-  // заместитель начальника отдела старший состав не добавляет, но инструкторов ведёт
-  const deputy = leadershipMessage({ level: 'Заместитель начальника отдела', addable: [], canInstructors: true, canReports: true });
-  assert.doesNotMatch(deputy, /Старший состав\*\*/);
-  assert.match(deputy, /\/инструктор/);
-
-  // пустые части не показываются
-  const bare = leadershipMessage({ level: 'Инструктор', addable: [], canInstructors: false, canReports: false });
-  assert.doesNotMatch(bare, /Старший состав\*\*/);
-  assert.doesNotMatch(bare, /\/инструктор/);
-  assert.doesNotMatch(bare, /общий-отчет/);
+  assert.doesNotMatch(leadershipMessage({ level: 'Инструктор', addable: [], canReports: false }), /\/общий-отчет/);
 });
 
 test('помощь: сообщения влезают в лимит Discord', () => {
   const all = [
     ...memoMessages('ARMY Delta Inst'),
-    leadershipMessage({ level: 'Владелец', addable: STAFF_ROLES.map((r) => r.label), canInstructors: true, canReports: true }),
+    leadershipMessage({ level: 'Владелец', addable: STAFF_ROLES.map(roleTitle), canReports: true }),
     unregisteredMessage('123456789012345678'),
   ];
   assert.ok(all.every((m) => m.length <= 2000));

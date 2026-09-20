@@ -1,4 +1,4 @@
-// Уровни доступа и панель /старший-состав. Владелец бота может всё; остальные добавляют только тех, кто ниже них.
+// Ранги и панель /старший-состав. Владелец бота выше всех; остальные трогают только тех, кто ниже них по рангу.
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -11,27 +11,29 @@ import {
   TextInputStyle,
 } from 'discord.js';
 
-// Сверху вниз: чем раньше в списке, тем выше уровень.
+// Чем больше число, тем выше ранг. Число показывается в списке в скобках и вводится при добавлении.
 export const STAFF_ROLES = [
-  { key: 'general', label: 'Генерал армии' },
-  { key: 'army-deputy', label: 'Заместитель армии' },
-  { key: 'curator', label: 'Куратор отдела' },
-  { key: 'head', label: 'Начальник отдела' },
-  { key: 'deputy', label: 'Заместитель начальника отдела' },
-  { key: 'instructor', label: 'Инструктор' },
+  { key: 'general', label: 'Генерал армии', rank: 6 },
+  { key: 'army-deputy', label: 'Заместитель армии', rank: 5 },
+  { key: 'curator', label: 'Куратор отдела', rank: 4 },
+  { key: 'head', label: 'Начальник отдела', rank: 3 },
+  { key: 'deputy', label: 'Заместитель начальника отдела', rank: 2 },
+  { key: 'instructor', label: 'Инструктор', rank: 1 },
 ];
+
+const OWNER_RANK = Infinity; // владелец выше всех
+const INSTRUCTOR_RANK = 1;
 
 // Прежние названия уровней в сохранённом файле.
 const LEGACY_KEYS = { 'senior-admin': 'general', admin: 'army-deputy', 'senior-staff': 'instructor' };
 
-const INSTRUCTOR = 'instructor';
-const levelOf = (key) => STAFF_ROLES.findIndex((r) => r.key === key); // 0 — самый высокий
 export const roleByKey = (key) => STAFF_ROLES.find((r) => r.key === key) ?? null;
+export const roleByRank = (rank) => STAFF_ROLES.find((r) => r.rank === rank) ?? null;
+export const roleTitle = (role) => `[${role.rank}] ${role.label}`;
 
 /**
- * Кто в каком уровне: { <key>: [{ id, name }] } в JSON-файле. Человек состоит в одном уровне.
- * Правило: добавлять и менять можно только тех, кто строго ниже тебя, и только на уровни строго ниже тебя.
- * Владелец (ownerId) — выше всех.
+ * Кто в каком ранге: { <key>: [{ id, name }] } в JSON-файле. Человек состоит в одном ранге.
+ * Правило: добавлять, убирать и менять можно только тех, кто ниже тебя по рангу, и только на ранги ниже твоего.
  */
 export class Staff {
   constructor(file, ownerId = '') {
@@ -46,7 +48,7 @@ export class Staff {
     }
     for (const [oldKey, list] of Object.entries(raw)) {
       const key = LEGACY_KEYS[oldKey] ?? oldKey;
-      if (levelOf(key) === -1) continue;
+      if (!roleByKey(key)) continue;
       this.data[key] = [...(this.data[key] ?? []), ...list.map((m) => (typeof m === 'string' ? { id: m, name: '' } : m))];
     }
   }
@@ -59,19 +61,24 @@ export class Staff {
     return this.data[key] ?? [];
   }
 
-  /** Ключ уровня человека или null. */
+  /** Ключ ранга человека или null. */
   roleKeyOf(userId) {
     return STAFF_ROLES.find(({ key }) => this.members(key).some((m) => m.id === userId))?.key ?? null;
+  }
+
+  /** Числовой ранг: владелец — выше всех, вне системы — 0. */
+  rankOf(userId) {
+    if (this.isOwner(userId)) return OWNER_RANK;
+    return roleByKey(this.roleKeyOf(userId))?.rank ?? 0;
   }
 
   has(userId) {
     return this.roleKeyOf(userId) !== null;
   }
 
-  /** Руководство: всё, кроме инструкторов. */
+  /** Старший состав: всё выше инструктора (и владелец). */
   isManager(userId) {
-    const key = this.roleKeyOf(userId);
-    return key !== null && key !== INSTRUCTOR;
+    return this.rankOf(userId) > INSTRUCTOR_RANK;
   }
 
   rolesOf(userId) {
@@ -82,61 +89,34 @@ export class Staff {
     return STAFF_ROLES.flatMap(({ key }) => this.members(key)).find((m) => m.id === userId)?.name ?? '';
   }
 
-  /** Все, кто есть хотя бы в одном уровне. */
+  /** Все, кто есть хотя бы в одном ранге. */
   everyone() {
     return STAFF_ROLES.flatMap(({ key }) => this.members(key).map((m) => m.id));
   }
 
-  /** Уровень того, кто действует: владелец -1 (выше всех), без уровня — бесконечность (не может ничего). */
-  #actorLevel(actorId) {
-    if (this.isOwner(actorId)) return -1;
-    const key = this.roleKeyOf(actorId);
-    return key === null ? Infinity : levelOf(key);
+  /** Ранги, на которые этот человек может добавлять (ниже его собственного). */
+  assignableRoles(actorId) {
+    const rank = this.rankOf(actorId);
+    return STAFF_ROLES.filter((r) => r.rank < rank);
   }
 
-  /** Уровни, на которые этот человек может добавлять (строго ниже него). */
-  assignableRoles(actorId) {
-    const level = this.#actorLevel(actorId);
-    return STAFF_ROLES.filter((_, i) => i > level);
+  /** Стоит ли человек ниже по рангу (для владельца — любой). Нужно и для отчётов человека, даже если он не в списке. */
+  outranks(actorId, targetId) {
+    if (this.isOwner(actorId)) return true;
+    const target = this.rankOf(targetId);
+    return target > 0 && target < this.rankOf(actorId);
   }
 
   canAssign(actorId, roleKey, targetId) {
-    const level = this.#actorLevel(actorId);
-    if (levelOf(roleKey) <= level) return false;
-    const current = this.roleKeyOf(targetId);
-    return current === null || levelOf(current) > level;
+    const role = roleByKey(roleKey);
+    if (!role || role.rank >= this.rankOf(actorId)) return false;
+    const current = this.rankOf(targetId);
+    return current === 0 || current < this.rankOf(actorId);
   }
 
-  /** Уровни выше инструктора, которые этот человек вправе добавлять (для /старший-состав). */
-  assignableSeniorRoles(actorId) {
-    return this.assignableRoles(actorId).filter((r) => r.key !== INSTRUCTOR);
-  }
-
-  /** Может ли вести инструкторов: владелец и все уровни выше инструктора. */
-  canManageInstructors(actorId) {
-    return this.assignableRoles(actorId).some((r) => r.key === INSTRUCTOR);
-  }
-
-  instructors() {
-    return this.members(INSTRUCTOR);
-  }
-
-  isInstructor(userId) {
-    return this.roleKeyOf(userId) === INSTRUCTOR;
-  }
-
-  /** Убирает инструктора из системы (его отчёты остаются); false, если такого инструктора нет. */
-  removeInstructor(userId) {
-    if (!this.isInstructor(userId)) return false;
-    this.data[INSTRUCTOR] = this.members(INSTRUCTOR).filter((m) => m.id !== userId);
-    this.#save();
-    return true;
-  }
-
-  /** Менять имя можно только тем, кто уже в уровне строго ниже тебя. */
+  /** Убирать и менять имя можно только тем, кто уже в списке и ниже тебя по рангу. */
   canEdit(actorId, targetId) {
-    const current = this.roleKeyOf(targetId);
-    return current !== null && levelOf(current) > this.#actorLevel(actorId);
+    return this.has(targetId) && this.outranks(actorId, targetId);
   }
 
   #save() {
@@ -144,13 +124,22 @@ export class Staff {
     fs.writeFileSync(this.file, JSON.stringify(this.data, null, 2));
   }
 
-  /** Добавляет человека в уровень (или переносит, если он был в другом) и записывает имя. */
+  /** Добавляет человека в ранг; если он уже был в другом, переносит. Возвращает 'added' или 'moved'. */
   add(roleKey, userId, name = '') {
     const previous = this.roleKeyOf(userId);
     if (previous) this.data[previous] = this.members(previous).filter((m) => m.id !== userId);
     this.data[roleKey] = [...this.members(roleKey), { id: userId, name: name.trim() }];
     this.#save();
     return previous === null ? 'added' : 'moved';
+  }
+
+  /** Убирает человека из списка (его отчёты остаются); false, если его там нет. */
+  remove(userId) {
+    const key = this.roleKeyOf(userId);
+    if (!key) return false;
+    this.data[key] = this.members(key).filter((m) => m.id !== userId);
+    this.#save();
+    return true;
   }
 
   setName(userId, name) {
@@ -162,13 +151,21 @@ export class Staff {
   }
 }
 
-const ADD_PREFIX = 'staff:add:';
-const MODAL_PREFIX = 'staff:modal:';
-export const NAME_BUTTON_ID = 'staff:name';
-export const NAME_MODAL_ID = 'staff:namemodal';
+export const STAFF_BUTTONS = {
+  add: 'staff:add',
+  remove: 'staff:remove',
+  name: 'staff:name',
+  addReport: 'staff:addreport',
+  removeReport: 'staff:removereport',
+};
+export const STAFF_MODALS = {
+  add: 'staff:addmodal',
+  remove: 'staff:removemodal',
+  name: 'staff:namemodal',
+  addReport: 'staff:addreportmodal',
+  removeReport: 'staff:removereportmodal',
+};
 export const isStaffInteractionId = (customId) => customId.startsWith('staff:');
-export const addRoleKey = (customId) => (customId.startsWith(ADD_PREFIX) ? customId.slice(ADD_PREFIX.length) : null);
-export const modalRoleKey = (customId) => (customId.startsWith(MODAL_PREFIX) ? customId.slice(MODAL_PREFIX.length) : null);
 
 const memberLine = ({ id, name }) => (name ? `<@${id}> | ${name}` : `<@${id}>`);
 
@@ -186,29 +183,24 @@ function fieldValue(members) {
   return lines.join('\n');
 }
 
-const SENIOR_ROLES = STAFF_ROLES.filter((r) => r.key !== INSTRUCTOR);
-
-/** Панель старшего состава (без инструкторов): список и кнопки только на уровни, которые человек вправе добавлять. */
+/** Список всех рангов с числами в скобках и пять кнопок. Кнопки только у тех, кто выше кого-то по рангу. */
 export function panelMessage(staff, actorId) {
   const embed = new EmbedBuilder()
     .setTitle('Старший состав')
-    .setDescription('Упоминание | имя и фамилия. Кнопки ниже — только для уровней, которые вы вправе добавлять. Инструкторы — команда /инструктор.')
-    .addFields(SENIOR_ROLES.map(({ key, label }) => ({ name: label, value: fieldValue(staff.members(key)) })));
+    .setDescription('Ранг в скобках. Добавить: ранг, ID, имя и фамилия. Убрать: ID. Трогать можно только тех, кто ниже вас.')
+    .addFields(STAFF_ROLES.map((role) => ({ name: roleTitle(role), value: fieldValue(staff.members(role.key)) })));
 
-  const buttons = staff
-    .assignableSeniorRoles(actorId)
-    .map(({ key, label }) =>
-      new ButtonBuilder().setCustomId(`${ADD_PREFIX}${key}`).setLabel(`Добавить: ${label}`).setStyle(ButtonStyle.Secondary),
-    );
-  if (buttons.length) {
-    buttons.push(new ButtonBuilder().setCustomId(NAME_BUTTON_ID).setLabel('Изменить имя').setStyle(ButtonStyle.Primary));
-  }
+  if (!staff.assignableRoles(actorId).length) return { embeds: [embed], components: [] };
 
-  const components = [];
-  for (let i = 0; i < buttons.length; i += 5) {
-    components.push(new ActionRowBuilder().addComponents(buttons.slice(i, i + 5)));
-  }
-  return { embeds: [embed], components };
+  const button = (kind, label, style) => new ButtonBuilder().setCustomId(STAFF_BUTTONS[kind]).setLabel(label).setStyle(style);
+  const row = new ActionRowBuilder().addComponents(
+    button('add', 'Добавить', ButtonStyle.Success),
+    button('remove', 'Убрать', ButtonStyle.Danger),
+    button('name', 'Изменить имя', ButtonStyle.Secondary),
+    button('addReport', 'Добавить отчёт', ButtonStyle.Primary),
+    button('removeReport', 'Убрать отчёт', ButtonStyle.Danger),
+  );
+  return { embeds: [embed], components: [row] };
 }
 
 const textInput = (id, label, { required = true, placeholder, maxLength = 100 } = {}) =>
@@ -222,78 +214,32 @@ const textInput = (id, label, { required = true, placeholder, maxLength = 100 } 
       .setPlaceholder(placeholder ?? ''),
   );
 
-/** Окно добавления: ID человека и (необязательно) имя с фамилией. */
-export function addModal(role) {
-  return new ModalBuilder()
-    .setCustomId(`${MODAL_PREFIX}${role.key}`)
-    .setTitle(`Добавить: ${role.label}`.slice(0, 45))
-    .addComponents(
-      textInput('user', 'ID человека или упоминание'),
-      textInput('name', 'Имя и фамилия (можно с тегом)', { required: false, placeholder: '[Инст.Delta] Имя Фамилия' }),
-    );
-}
+const NAME_PLACEHOLDER = '[Инст.Delta] Имя Фамилия';
 
-/** Окно смены имени уже добавленного человека. */
-export function nameModal() {
-  return new ModalBuilder()
-    .setCustomId(NAME_MODAL_ID)
-    .setTitle('Изменить имя')
-    .addComponents(
-      textInput('user', 'ID человека или упоминание'),
-      textInput('name', 'Новые имя и фамилия', { placeholder: '[Инст.Delta] Имя Фамилия' }),
-    );
-}
-
-// ── Панель /инструктор ───────────────────────────────────────────────────────────────────────
-
-export const INSTRUCTOR_BUTTONS = {
-  add: 'inst:add',
-  remove: 'inst:remove',
-  addReport: 'inst:addreport',
-  removeReport: 'inst:removereport',
-};
-export const INSTRUCTOR_MODALS = {
-  add: 'inst:addmodal',
-  remove: 'inst:removemodal',
-  addReport: 'inst:addreportmodal',
-  removeReport: 'inst:removereportmodal',
-};
-export const isInstructorInteractionId = (customId) => customId.startsWith('inst:');
-
-/** Панель инструкторов: список и четыре кнопки. */
-export function instructorPanelMessage(staff) {
-  const embed = new EmbedBuilder()
-    .setTitle('Инструкторы')
-    .setDescription(fieldValue(staff.instructors()))
-    .setFooter({ text: 'Упоминание | имя и фамилия' });
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(INSTRUCTOR_BUTTONS.add).setLabel('Добавить инструктора').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(INSTRUCTOR_BUTTONS.remove).setLabel('Убрать инструктора').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId(INSTRUCTOR_BUTTONS.addReport).setLabel('Добавить отчёт инструктору').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(INSTRUCTOR_BUTTONS.removeReport).setLabel('Убрать отчёт инструктору').setStyle(ButtonStyle.Danger),
-  );
-  return { embeds: [embed], components: [row] };
-}
-
-/** Окно по кнопке панели инструкторов: kind — ключ из INSTRUCTOR_BUTTONS. */
-export function instructorModal(kind) {
-  const idField = textInput('user', 'ID инструктора или упоминание');
-  const modal = new ModalBuilder().setCustomId(INSTRUCTOR_MODALS[kind]);
+/** Окно по кнопке панели: kind — ключ из STAFF_BUTTONS. */
+export function staffModal(kind) {
+  const idField = textInput('user', 'ID человека или упоминание');
+  const modal = new ModalBuilder().setCustomId(STAFF_MODALS[kind]);
   switch (kind) {
     case 'add':
       return modal
-        .setTitle('Добавить инструктора')
+        .setTitle('Добавить')
         .addComponents(
+          textInput('rank', 'Ранг (цифра из списка)', { placeholder: '5', maxLength: 1 }),
           idField,
-          textInput('name', 'Имя и фамилия (можно с тегом)', { required: false, placeholder: '[Инст.Delta] Имя Фамилия' }),
+          textInput('name', 'Имя и фамилия (можно с тегом)', { required: false, placeholder: NAME_PLACEHOLDER }),
         );
     case 'remove':
-      return modal.setTitle('Убрать инструктора').addComponents(idField);
+      return modal.setTitle('Убрать').addComponents(idField);
+    case 'name':
+      return modal
+        .setTitle('Изменить имя')
+        .addComponents(idField, textInput('name', 'Новые имя и фамилия', { placeholder: NAME_PLACEHOLDER }));
     case 'addReport':
-      return modal.setTitle('Добавить отчёт инструктору').addComponents(idField);
+      return modal.setTitle('Добавить отчёт').addComponents(textInput('user', 'ID того, за кого записываете отчёт'));
     case 'removeReport':
       return modal
-        .setTitle('Убрать отчёт инструктору')
+        .setTitle('Убрать отчёт')
         .addComponents(textInput('link', 'Ссылка на отчёт', { maxLength: 200, placeholder: 'https://discord.com/channels/…' }));
     default:
       throw new Error(`Неизвестное окно: ${kind}`);

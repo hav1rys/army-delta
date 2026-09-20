@@ -22,26 +22,20 @@ import {
   parseCheck,
   parseReport,
 } from './parsing.js';
-import { addAccepted, addRejected, duplicateMessage, findDuplicate, parseUserId, removeByLink } from './manual.js';
+import { addAccepted, addRejected, duplicateMessage, findDuplicate, parseUserId, removeByLinkAllowed } from './manual.js';
 import { ActingFor } from './acting.js';
 import { leadershipMessage, memoMessages, unregisteredMessage } from './memo.js';
 import {
-  INSTRUCTOR_BUTTONS,
-  INSTRUCTOR_MODALS,
-  NAME_BUTTON_ID,
-  NAME_MODAL_ID,
+  STAFF_BUTTONS,
+  STAFF_MODALS,
   Staff,
-  addModal,
-  addRoleKey,
-  instructorModal,
-  instructorPanelMessage,
-  isInstructorInteractionId,
   isStaffInteractionId,
-  modalRoleKey,
-  nameModal,
   panelMessage,
-  roleByKey,
+  roleByRank,
+  roleTitle,
+  staffModal,
 } from './staff.js';
+import { lookupMessages } from './lookup.js';
 import { statsMessages } from './stats.js';
 import { Store } from './store.js';
 
@@ -63,7 +57,7 @@ const staff = new Staff(path.join(DATA_DIR, 'staff.json'), OWNER_USER_ID);
 const actingFor = new ActingFor();
 
 const isOwner = (userId) => staff.isOwner(userId);
-/** Руководство: владелец и все уровни выше инструктора. */
+/** Старший состав: владелец и все ранги выше инструктора. */
 const isManager = (userId) => isOwner(userId) || staff.isManager(userId);
 const isStaff = (userId) => isOwner(userId) || staff.has(userId);
 
@@ -127,22 +121,35 @@ const numberOption = (name, description) => ({
 });
 
 // Необязательное поле в командах добавления: записать отчёт в список другого проверяющего.
-const forOption = textOption('проверяющий', 'Только старший состав: записать за инструктора (ID). Пусто: на вас', false);
+const forOption = textOption('проверяющий', 'Записать за того, кто ниже вас по рангу (ID). Пусто: на вас', false);
 
-/** Чей список пополняем: свой или (за другого) список инструктора; за других могут только старший состав и владелец. */
+/** Чей список пополняем: свой или (за другого) того, кто ниже вас по рангу. */
 function targetStore(userId, i) {
   const forWho = i.options.getString('проверяющий');
   if (!forWho) return { store: storeFor(userId) };
-  if (!staff.canManageInstructors(userId)) {
-    return { error: 'Записывать отчёты за других может только старший состав. Инструктор записывает свои.' };
-  }
   const id = parseUserId(forWho);
-  if (!id) return { error: 'Не похоже на ID инструктора: нужно число из 17–20 цифр (или упоминание).' };
-  if (!staff.isInstructor(id)) return { error: `<@${id}> нет в списке инструкторов: сначала добавьте его через /инструктор.` };
+  if (!id) return { error: 'Не похоже на ID: нужно число из 17–20 цифр (или упоминание).' };
+  if (id !== userId && !staff.outranks(userId, id)) {
+    return { error: 'Записывать отчёты за других можно только тем, кто ниже вас по рангу. Свои — без этого поля.' };
+  }
   return { store: storeFor(id) };
 }
 
-const managersOnly = (text) => `Нет доступа: ${text} для руководства (уровни выше инструктора).`;
+/** Удаляет отчёт по ссылке: свои и тех, кто ниже вас по рангу. Возвращает текст ответа. */
+function removeReportFor(actorId, link) {
+  const result = removeByLinkAllowed(everyStore(), link, (checkerId) => checkerId === actorId || staff.outranks(actorId, checkerId));
+  if (result.error) return result.error;
+  const lines = [];
+  if (result.removed.length) {
+    lines.push(`Удалено: ${result.removed.map(({ checkerId, name }) => `${name ?? 'без имени'} (проверил <@${checkerId}>)`).join(', ')}`);
+  }
+  if (result.denied.length) {
+    lines.push(`Нельзя удалить: отчёт у ${result.denied.map((id) => `<@${id}>`).join(', ')}, он не ниже вас по рангу.`);
+  }
+  return lines.length ? lines.join('\n') : 'Такого отчёта не найдено.';
+}
+
+const managersOnly = (text) => `Нет доступа: ${text} для тех, кто выше инструктора по рангу.`;
 
 // Слэш-команды. run(userId, interaction) возвращает список сообщений для ответа:
 // строки или готовое содержимое ({ embeds, components }). open — доступна и незарегистрированным.
@@ -206,18 +213,7 @@ const COMMANDS = {
   'удалить-отчет': {
     description: 'Удалить отчёт (принятый или отказанный) по ссылке',
     options: [textOption('ссылка', 'Ссылка на отчёт')],
-    run(userId, i) {
-      const link = i.options.getString('ссылка', true);
-      // Руководство удаляет у любого проверяющего, остальные — только свои.
-      const stores = isManager(userId) ? everyStore() : [{ checkerId: userId, store: storeFor(userId) }];
-      const removed = [];
-      for (const { checkerId, store } of stores) {
-        const result = removeByLink(store, link);
-        if (result.error) return [result.error];
-        if (result.removed) removed.push(`${result.name ?? 'без имени'} (проверил <@${checkerId}>)`);
-      }
-      return [removed.length ? `Удалено: ${removed.join(', ')}` : 'Такого отчёта не найдено.'];
-    },
+    run: (userId, i) => [removeReportFor(userId, i.options.getString('ссылка', true))],
   },
 
   'отчет': {
@@ -255,30 +251,12 @@ const COMMANDS = {
   },
 
   'старший-состав': {
-    description: 'Старший состав: добавить человека выше инструктора и изменить имя',
+    description: 'Список рангов: добавить, убрать, имя, отчёты',
     run(userId) {
-      if (!staff.assignableSeniorRoles(userId).length) {
-        return [
-          OWNER_USER_ID
-            ? 'Нет доступа: старший состав добавляют владелец и уровни выше заместителя начальника отдела.'
-            : 'Не задана переменная OWNER_USER_ID.',
-        ];
+      if (!staff.assignableRoles(userId).length) {
+        return [OWNER_USER_ID ? 'Нет доступа: команда для тех, у кого есть кто-то ниже по рангу.' : 'Не задана переменная OWNER_USER_ID.'];
       }
       return [panelMessage(staff, userId)];
-    },
-  },
-
-  'инструктор': {
-    description: 'Инструкторы: добавить, убрать, добавить или убрать отчёт',
-    run(userId) {
-      if (!staff.canManageInstructors(userId)) {
-        return [
-          OWNER_USER_ID
-            ? 'Нет доступа: инструкторов ведёт старший состав.'
-            : 'Не задана переменная OWNER_USER_ID.',
-        ];
-      }
-      return [instructorPanelMessage(staff)];
     },
   },
 
@@ -288,15 +266,19 @@ const COMMANDS = {
     run(userId) {
       if (!isUserAllowed(userId)) return [unregisteredMessage(userId)];
       const messages = memoMessages(client.user?.username);
-      const addable = staff.assignableSeniorRoles(userId).map((r) => r.label);
-      const canInstructors = staff.canManageInstructors(userId);
-      const canReports = isManager(userId);
-      if (addable.length || canInstructors || canReports) {
-        const level = isOwner(userId) ? 'Владелец' : staff.rolesOf(userId) || 'Ваш уровень';
-        messages.push(leadershipMessage({ level, addable, canInstructors, canReports }));
+      const addable = staff.assignableRoles(userId).map(roleTitle);
+      if (addable.length) {
+        const level = isOwner(userId) ? 'Владелец' : staff.rolesOf(userId) || 'Ваш ранг';
+        messages.push(leadershipMessage({ level, addable, canReports: isManager(userId) }));
       }
       return messages;
     },
+  },
+
+  'проверить-наличие': {
+    description: 'Проверить, есть ли отчёты: по именам и фамилиям или Discord ID',
+    options: [textOption('список', 'Имена и фамилии или ID через запятую (можно несколько)')],
+    run: (userId, i) => lookupMessages(everyStore(), i.options.getString('список', true)),
   },
 
   'статус': {
@@ -345,61 +327,56 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 const denyPanel = (interaction, text) => interaction.reply({ content: text, flags: MessageFlags.Ephemeral });
-const NOT_LOWER = 'Недостаточно прав: добавлять и менять можно только тех, кто ниже вас по уровню.';
-
-const NOT_MANAGER = 'Недостаточно прав: инструкторов ведёт старший состав.';
+const NOT_LOWER = 'Недостаточно прав: трогать можно только тех, кто ниже вас по рангу.';
 const replyHere = (interaction, payload) =>
   interaction.reply({ ...payload, flags: interaction.inGuild() ? MessageFlags.Ephemeral : undefined });
 
-/** Кнопки и окна панели /инструктор. Права проверяются при каждом действии. */
-async function onInstructorInteraction(interaction) {
+/** Кнопки и окна панели /старший-состав. Права проверяются при каждом действии, а не только при открытии. */
+async function onPanelInteraction(interaction) {
   const actorId = interaction.user.id;
-  if (!staff.canManageInstructors(actorId)) return denyPanel(interaction, NOT_MANAGER);
+  if (!staff.assignableRoles(actorId).length) return denyPanel(interaction, NOT_LOWER);
 
   const kindOf = (ids) => Object.keys(ids).find((k) => ids[k] === interaction.customId);
 
   // Нажатия кнопок открывают окно ввода.
   if (interaction.isButton()) {
-    const kind = kindOf(INSTRUCTOR_BUTTONS);
-    return kind ? interaction.showModal(instructorModal(kind)) : undefined;
+    const kind = kindOf(STAFF_BUTTONS);
+    return kind ? interaction.showModal(staffModal(kind)) : undefined;
   }
 
-  const kind = kindOf(INSTRUCTOR_MODALS);
+  const kind = kindOf(STAFF_MODALS);
+  const field = (id) => interaction.fields.getTextInputValue(id);
   const refreshPanel = () => {
-    const panel = instructorPanelMessage(staff);
+    const panel = panelMessage(staff, actorId);
     return interaction.isFromMessage() ? interaction.update(panel) : replyHere(interaction, panel);
   };
 
-  // «Убрать отчёт инструктору»: достаточно ссылки на отчёт.
+  // «Убрать отчёт»: достаточно ссылки.
   if (kind === 'removeReport') {
-    const link = interaction.fields.getTextInputValue('link');
-    const removed = [];
-    for (const { checkerId, store } of everyStore()) {
-      const result = removeByLink(store, link);
-      if (result.error) return denyPanel(interaction, result.error);
-      if (result.removed) removed.push(`${result.name ?? 'без имени'} (инструктор <@${checkerId}>)`);
-    }
-    return replyHere(interaction, {
-      content: removed.length ? `Удалено: ${removed.join(', ')}` : 'Такого отчёта не найдено.',
-      allowedMentions: noPings,
-    });
+    return replyHere(interaction, { content: removeReportFor(actorId, field('link')), allowedMentions: noPings });
   }
 
-  const userId = parseUserId(interaction.fields.getTextInputValue('user'));
-  if (!userId) return denyPanel(interaction, 'Не похоже на ID инструктора: нужно число из 17–20 цифр (или упоминание).');
+  const userId = parseUserId(field('user'));
+  if (!userId) return denyPanel(interaction, 'Не похоже на ID человека: нужно число из 17–20 цифр (или упоминание).');
 
   switch (kind) {
-    case 'add':
-      if (!staff.canAssign(actorId, 'instructor', userId)) return denyPanel(interaction, NOT_LOWER);
-      staff.add('instructor', userId, interaction.fields.getTextInputValue('name'));
+    case 'add': {
+      const role = roleByRank(Number(field('rank')));
+      if (!role) return denyPanel(interaction, 'Ранг — цифра из списка (в скобках у названия ранга).');
+      if (!staff.canAssign(actorId, role.key, userId)) return denyPanel(interaction, NOT_LOWER);
+      staff.add(role.key, userId, field('name')); // если человек уже в списке, он переносится на этот ранг
       return refreshPanel();
+    }
     case 'remove':
-      if (!staff.removeInstructor(userId)) return denyPanel(interaction, `<@${userId}> нет в списке инструкторов.`);
+      if (!staff.canEdit(actorId, userId)) return denyPanel(interaction, NOT_LOWER);
+      staff.remove(userId);
+      return refreshPanel();
+    case 'name':
+      if (!staff.canEdit(actorId, userId)) return denyPanel(interaction, NOT_LOWER);
+      staff.setName(userId, field('name'));
       return refreshPanel();
     case 'addReport':
-      if (!staff.isInstructor(userId)) {
-        return denyPanel(interaction, `<@${userId}> нет в списке инструкторов: сначала добавьте его.`);
-      }
+      if (!staff.outranks(actorId, userId)) return denyPanel(interaction, NOT_LOWER);
       actingFor.set(actorId, userId);
       return replyHere(interaction, {
         content:
@@ -410,39 +387,6 @@ async function onInstructorInteraction(interaction) {
     default:
       return undefined;
   }
-}
-
-/** Кнопки и окна панели /старший-состав. Права проверяются при каждом действии, а не только при открытии. */
-async function onPanelInteraction(interaction) {
-  const actorId = interaction.user.id;
-  if (!staff.assignableSeniorRoles(actorId).length) return denyPanel(interaction, NOT_LOWER);
-
-  // Нажатия кнопок открывают окно ввода.
-  if (interaction.isButton()) {
-    if (interaction.customId === NAME_BUTTON_ID) return interaction.showModal(nameModal());
-    const role = roleByKey(addRoleKey(interaction.customId));
-    if (!role || !staff.assignableSeniorRoles(actorId).some((r) => r.key === role.key)) return denyPanel(interaction, NOT_LOWER);
-    return interaction.showModal(addModal(role));
-  }
-
-  // Отправка окна ввода.
-  const userId = parseUserId(interaction.fields.getTextInputValue('user'));
-  if (!userId) {
-    return denyPanel(interaction, 'Не похоже на ID человека: нужно число из 17–20 цифр (или упоминание).');
-  }
-  const name = interaction.fields.getTextInputValue('name');
-
-  if (interaction.customId === NAME_MODAL_ID) {
-    if (!staff.canEdit(actorId, userId)) return denyPanel(interaction, NOT_LOWER);
-    staff.setName(userId, name);
-  } else {
-    const role = roleByKey(modalRoleKey(interaction.customId));
-    if (!role || !staff.canAssign(actorId, role.key, userId)) return denyPanel(interaction, NOT_LOWER);
-    staff.add(role.key, userId, name);
-  }
-
-  const panel = panelMessage(staff, actorId);
-  return interaction.isFromMessage() ? interaction.update(panel) : interaction.reply({ ...panel, flags: MessageFlags.Ephemeral });
 }
 
 /**
@@ -484,11 +428,7 @@ async function deliver(interaction, messages) {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isButton() || interaction.isModalSubmit()) {
-    const handler = isStaffInteractionId(interaction.customId)
-      ? onPanelInteraction
-      : isInstructorInteractionId(interaction.customId)
-        ? onInstructorInteraction
-        : null;
+    const handler = isStaffInteractionId(interaction.customId) ? onPanelInteraction : null;
     handler?.(interaction).catch((err) => console.error('Ошибка панели:', err));
     return;
   }

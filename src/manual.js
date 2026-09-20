@@ -84,3 +84,26 @@ export function removeByLink(store, linkText) {
   const name = store.report(ref.messageId)?.name ?? null;
   return store.remove(ref.messageId) ? { removed: true, name } : { removed: false };
 }
+
+/**
+ * Удаляет отчёт по ссылке у тех, чьи отчёты можно трогать: canRemove(checkerId).
+ * Возвращает { removed: [{ checkerId, name }], denied: [checkerId] } (denied — отчёт нашёлся, но трогать его нельзя)
+ * или { error }, если это не ссылка на сообщение Discord.
+ */
+export function removeByLinkAllowed(stores, linkText, canRemove) {
+  const ref = findMessageLink(linkText);
+  if (!ref) return { error: 'Не похоже на ссылку на отчёт: нужна ссылка на сообщение Discord.' };
+
+  const removed = [];
+  const denied = [];
+  for (const { checkerId, store } of stores) {
+    if (!store.report(ref.messageId) && !store.verdict(ref.messageId)) continue;
+    if (canRemove(checkerId)) {
+      removed.push({ checkerId, name: store.report(ref.messageId)?.name ?? null });
+      store.remove(ref.messageId);
+    } else {
+      denied.push(checkerId);
+    }
+  }
+  return { removed, denied };
+}
