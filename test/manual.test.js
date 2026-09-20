@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { formRows } from '../src/forms.js';
-import { addAccepted, addRejected, findDuplicate, parseUserId, removeByLink } from '../src/manual.js';
+import { addAccepted, addRejected, badIdMessage, badRankMessage, findDuplicate, parseUserId, removeByLink } from '../src/manual.js';
 import { Store } from '../src/store.js';
 
 const LINK = 'https://discord.com/channels/713076174108229712/1027944923829383188/1548582679338024982';
@@ -128,4 +128,21 @@ test('findDuplicate: находит только другой отчёт тог�
   assert.equal(findDuplicate(stores, ACCEPTED.id, '1548582679338024982'), null);
   assert.equal(findDuplicate(stores, ACCEPTED.id, '999').checkerId, '1');
   assert.equal(findDuplicate(stores, '466633638511902752', '999'), null);
+});
+
+test('ошибка про ID показывает, что ввели, и подсказывает, где взять ID', () => {
+  const text = badIdMessage('@Ruslan Evil');
+  assert.match(text, /получил «@Ruslan Evil»/);
+  assert.match(text, /17–20 цифр/);
+  assert.match(text, /Копировать ID/);
+  assert.match(badIdMessage(''), /«пусто»/);
+  assert.match(badIdMessage('x'.repeat(100)), /«x{40}…»/); // длинный ввод обрезается
+
+  // и в командах добавления
+  const store = tempStore();
+  assert.match(addAccepted(store, { ...ACCEPTED, id: '@Ruslan Evil' }).error, /получил «@Ruslan Evil»/);
+});
+
+test('ошибка про ранг: диапазон и что ввели', () => {
+  assert.equal(badRankMessage('9', 6), 'Ранг — цифра от 1 до 6 (в скобках перед названием ранга). Получил «9».');
 });

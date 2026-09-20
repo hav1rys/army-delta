@@ -76,6 +76,13 @@ export class Staff {
     return this.roleKeyOf(userId) !== null;
   }
 
+  /** Ранг словами для сообщений: «владелец», «[3] Начальник отдела» или «нет в списке». */
+  describeRank(userId) {
+    if (this.isOwner(userId)) return 'владелец';
+    const role = roleByKey(this.roleKeyOf(userId));
+    return role ? roleTitle(role) : 'нет в списке';
+  }
+
   /** Старший состав: всё выше инструктора (и владелец). */
   isManager(userId) {
     return this.rankOf(userId) > INSTRUCTOR_RANK;

@@ -4,9 +4,23 @@ import { findMessageLink } from './parsing.js';
 /** ID человека: число (17–20 цифр) или упоминание вида <@id>. */
 export const parseUserId = (text) => /\d{17,20}/.exec(text ?? '')?.[0] ?? null;
 
+const shorten = (text) => {
+  const t = (text ?? '').trim();
+  return t.length > 40 ? `${t.slice(0, 40)}…` : t || 'пусто';
+};
+
+/** Ошибка про ID с тем, что реально ввели: обычно вместо числа там @имя, а в окнах ввода оно не работает. */
+export const badIdMessage = (input) =>
+  `Не похоже на ID: получил «${shorten(input)}». Нужно число из 17–20 цифр (правый клик по профилю → «Копировать ID пользователя»). ` +
+  '@имя в окне не работает.';
+
+/** Ошибка про ранг: цифра из списка, и что ввели. */
+export const badRankMessage = (input, maxRank) =>
+  `Ранг — цифра от 1 до ${maxRank} (в скобках перед названием ранга). Получил «${shorten(input)}».`;
+
 function checkCommon({ id, link }) {
   const userId = parseUserId(id);
-  if (!userId) return { error: 'Не похоже на ID человека: нужно число из 17–20 цифр (или упоминание).' };
+  if (!userId) return { error: badIdMessage(id) };
   const ref = findMessageLink(link);
   if (!ref) return { error: 'Не похоже на ссылку на отчёт: нужна ссылка на сообщение Discord.' };
   return { userId, ref };

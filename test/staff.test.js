@@ -281,3 +281,11 @@ test('статистика: длинный список делится на со
   assert.ok(parts.every((m) => m.length <= 2000));
   assert.match(parts.at(-1), /Итого/);
 });
+
+test('ранг словами для сообщений об отказе', () => {
+  const staff = tempStaff();
+  staff.add('head', '3');
+  assert.equal(staff.describeRank(OWNER), 'владелец');
+  assert.equal(staff.describeRank('3'), '[3] Начальник отдела');
+  assert.equal(staff.describeRank('999'), 'нет в списке');
+});

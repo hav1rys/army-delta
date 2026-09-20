@@ -22,11 +22,21 @@ import {
   parseCheck,
   parseReport,
 } from './parsing.js';
-import { addAccepted, addRejected, duplicateMessage, findDuplicate, parseUserId, removeByLinkAllowed } from './manual.js';
+import {
+  addAccepted,
+  addRejected,
+  badIdMessage,
+  badRankMessage,
+  duplicateMessage,
+  findDuplicate,
+  parseUserId,
+  removeByLinkAllowed,
+} from './manual.js';
 import { ActingFor } from './acting.js';
 import { leadershipMessage, memoMessages, unregisteredMessage } from './memo.js';
 import {
   STAFF_BUTTONS,
+  STAFF_ROLES,
   STAFF_MODALS,
   Staff,
   isStaffInteractionId,
@@ -128,7 +138,7 @@ function targetStore(userId, i) {
   const forWho = i.options.getString('проверяющий');
   if (!forWho) return { store: storeFor(userId) };
   const id = parseUserId(forWho);
-  if (!id) return { error: 'Не похоже на ID: нужно число из 17–20 цифр (или упоминание).' };
+  if (!id) return { error: badIdMessage(forWho) };
   if (id !== userId && !staff.outranks(userId, id)) {
     return { error: 'Записывать отчёты за других можно только тем, кто ниже вас по рангу. Свои — без этого поля.' };
   }
@@ -254,7 +264,11 @@ const COMMANDS = {
     description: 'Список рангов: добавить, убрать, имя, отчёты',
     run(userId) {
       if (!staff.assignableRoles(userId).length) {
-        return [OWNER_USER_ID ? 'Нет доступа: команда для тех, у кого есть кто-то ниже по рангу.' : 'Не задана переменная OWNER_USER_ID.'];
+        return [
+          OWNER_USER_ID
+            ? `Нет доступа: команда для тех, у кого есть кто-то ниже по рангу. Ваш ранг: ${staff.describeRank(userId)}.${notOwnerHint(userId)}`
+            : 'Не задана переменная OWNER_USER_ID.',
+        ];
       }
       return [panelMessage(staff, userId)];
     },
@@ -327,14 +341,28 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 const denyPanel = (interaction, text) => interaction.reply({ content: text, flags: MessageFlags.Ephemeral });
-const NOT_LOWER = 'Недостаточно прав: трогать можно только тех, кто ниже вас по рангу.';
+/** Если действует не владелец и не человек из списка, почти всегда дело в OWNER_USER_ID. */
+const notOwnerHint = (actorId) =>
+  staff.has(actorId) || staff.isOwner(actorId)
+    ? ''
+    : `\nВас нет в списке, и вы не владелец. Ваш ID: ${actorId}. Владелец задаётся переменной OWNER_USER_ID.`;
+
+/** Почему нельзя трогать этого человека: ваш ранг, его ранг, правило. */
+const whyNotLower = (actorId, targetId) =>
+  `Недостаточно прав. Ваш ранг: ${staff.describeRank(actorId)}. У <@${targetId}>: ${staff.describeRank(targetId)}. ` +
+  `Трогать можно только тех, кто ниже вас по рангу.${notOwnerHint(actorId)}`;
 const replyHere = (interaction, payload) =>
   interaction.reply({ ...payload, flags: interaction.inGuild() ? MessageFlags.Ephemeral : undefined });
 
 /** Кнопки и окна панели /старший-состав. Права проверяются при каждом действии, а не только при открытии. */
 async function onPanelInteraction(interaction) {
   const actorId = interaction.user.id;
-  if (!staff.assignableRoles(actorId).length) return denyPanel(interaction, NOT_LOWER);
+  if (!staff.assignableRoles(actorId).length) {
+    return denyPanel(
+      interaction,
+      `Недостаточно прав. Ваш ранг: ${staff.describeRank(actorId)}: под вами никого нет.${notOwnerHint(actorId)}`,
+    );
+  }
 
   const kindOf = (ids) => Object.keys(ids).find((k) => ids[k] === interaction.customId);
 
@@ -357,26 +385,34 @@ async function onPanelInteraction(interaction) {
   }
 
   const userId = parseUserId(field('user'));
-  if (!userId) return denyPanel(interaction, 'Не похоже на ID человека: нужно число из 17–20 цифр (или упоминание).');
+  if (!userId) return denyPanel(interaction, badIdMessage(field('user')));
 
   switch (kind) {
     case 'add': {
       const role = roleByRank(Number(field('rank')));
-      if (!role) return denyPanel(interaction, 'Ранг — цифра из списка (в скобках у названия ранга).');
-      if (!staff.canAssign(actorId, role.key, userId)) return denyPanel(interaction, NOT_LOWER);
+      if (!role) return denyPanel(interaction, badRankMessage(field('rank'), STAFF_ROLES.length));
+      if (role.rank >= staff.rankOf(actorId)) {
+        return denyPanel(
+          interaction,
+          `Ранг ${roleTitle(role)} не ниже вашего (${staff.describeRank(actorId)}): ставить можно только на ранги ниже своего.${notOwnerHint(actorId)}`,
+        );
+      }
+      if (!staff.canAssign(actorId, role.key, userId)) return denyPanel(interaction, whyNotLower(actorId, userId));
       staff.add(role.key, userId, field('name')); // если человек уже в списке, он переносится на этот ранг
       return refreshPanel();
     }
     case 'remove':
-      if (!staff.canEdit(actorId, userId)) return denyPanel(interaction, NOT_LOWER);
+      if (!staff.has(userId)) return denyPanel(interaction, `<@${userId}> нет в списке: убирать некого.`);
+      if (!staff.canEdit(actorId, userId)) return denyPanel(interaction, whyNotLower(actorId, userId));
       staff.remove(userId);
       return refreshPanel();
     case 'name':
-      if (!staff.canEdit(actorId, userId)) return denyPanel(interaction, NOT_LOWER);
+      if (!staff.has(userId)) return denyPanel(interaction, `<@${userId}> нет в списке: имя можно менять только у добавленных.`);
+      if (!staff.canEdit(actorId, userId)) return denyPanel(interaction, whyNotLower(actorId, userId));
       staff.setName(userId, field('name'));
       return refreshPanel();
     case 'addReport':
-      if (!staff.outranks(actorId, userId)) return denyPanel(interaction, NOT_LOWER);
+      if (!staff.outranks(actorId, userId)) return denyPanel(interaction, whyNotLower(actorId, userId));
       actingFor.set(actorId, userId);
       return replyHere(interaction, {
         content:
