@@ -179,6 +179,27 @@ export function diagnose(text) {
   return { kind: 'check', problems };
 }
 
+/** «delta», «DELTA» -> «Delta»: этот отдел всегда пишется одинаково; остальные как написано. */
+export const normalizeDepartment = (department) => (/^delta$/i.test(department.trim()) ? 'Delta' : department.trim());
+
+// Теги инструкторов бывают только на английском: I, Inst, Instructor.
+// Три самых частых написания: «I.Delta», «Inst.Delta», «Instructor Delta»; четвёртое — слитно: «InstructorDelta».
+const INSTRUCTOR_WITH_SEPARATOR = /^(?:i|inst|instructor)[.\s_-]+(.+)$/i;
+// Слитно принимается только с отделом Delta, иначе под правило попали бы обычные слова вроде «Institute».
+const INSTRUCTOR_JOINED = /^(?:i|inst|instructor)(delta)$/i;
+const INSTRUCTOR_ALONE = /^instructor$/i;
+
+/**
+ * Тег должности из ника -> отдел инструктора. «I.Delta», «Inst.Delta», «Instructor Delta», «InstructorDelta»
+ * дают «Delta»; «Instructor» без отдела даёт ''; если это не инструктор, null. Русские написания не принимаются.
+ */
+export function instructorDepartment(tag) {
+  const text = (tag ?? '').trim();
+  const found = INSTRUCTOR_WITH_SEPARATOR.exec(text) ?? INSTRUCTOR_JOINED.exec(text);
+  if (found) return normalizeDepartment(found[1]);
+  return INSTRUCTOR_ALONE.test(text) ? '' : null;
+}
+
 const normName = (s) => s.toLowerCase().replace(/[_\s]+/g, ' ').trim();
 
 /**

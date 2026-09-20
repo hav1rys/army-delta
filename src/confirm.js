@@ -9,7 +9,7 @@ import {
   TextInputBuilder,
   TextInputStyle,
 } from 'discord.js';
-import { entryPoints, premiumEntries } from './forms.js';
+import { entryPoints, positionLabel, premiumEntries } from './forms.js';
 import { badIdMessage, parseUserId } from './manual.js';
 import { bonusInfo, formatMoney } from './parsing.js';
 
@@ -91,7 +91,7 @@ export function applyEdits({ check, report }, edits = {}) {
  * Поля карточки и предупреждения. others — уже сохранённые отчёты этого человека у всех проверяющих
  * (чтобы сказать, пойдёт ли этот отчёт в премию).
  */
-export function previewFields({ check, report, others = [] }) {
+export function previewFields({ check, report, others = [], isInstructor }) {
   const verdict = { ...check }; // userId, link, accepted, points, minimum, reason, rank, position
   const candidate = { messageId: check.messageId, verdict, report };
   const points = entryPoints(candidate);
@@ -116,7 +116,7 @@ export function previewFields({ check, report, others = [] }) {
     { name: 'Тип премии', value: info?.type ?? '—', inline: true },
     { name: 'Размер премии', value: info ? formatMoney(info.amount) : '—', inline: true },
     { name: 'Ранг', value: `${report?.rank ?? check.rank ?? UNKNOWN}`, inline: true },
-    { name: 'Должность', value: `${report?.position ?? check.position ?? UNKNOWN}`, inline: true },
+    { name: 'Должность', value: positionLabel(candidate, isInstructor), inline: true },
   );
 
   const best = premiumEntries([...others, candidate]).find((e) => e.verdict.userId === check.userId);
@@ -135,9 +135,9 @@ export function previewFields({ check, report, others = [] }) {
 }
 
 /** Карточка с тремя кнопками: сохранить, изменить, отменить. */
-export function confirmMessage(token, data, others, prefix = '') {
+export function confirmMessage(token, data, others, prefix = '', isInstructor) {
   const { check, report } = applyEdits(data, data.edits);
-  const { fields, warnings } = previewFields({ check, report, others });
+  const { fields, warnings } = previewFields({ check, report, others, isInstructor });
   const editing = data.mode === 'edit'; // правка уже сохранённого отчёта, а не новая проверка
   const embed = new EmbedBuilder()
     .setTitle(`${prefix}${editing ? 'Изменение отчёта: проверьте и подтвердите' : 'Проверьте и подтвердите'}`)

@@ -77,6 +77,7 @@ const isOwner = (userId) => staff.isOwner(userId);
 /** Старший состав: владелец и все ранги выше инструктора. */
 const isManager = (userId) => isOwner(userId) || staff.isManager(userId);
 const isStaff = (userId) => isOwner(userId) || staff.has(userId);
+const isInstructor = (userId) => staff.isInstructor(userId);
 
 // У каждого пользователя своё хранилище: отчёты и проверки разных людей не смешиваются.
 const stores = new Map();
@@ -247,7 +248,7 @@ const COMMANDS = {
     description: 'Три формы по отчётам, которые проверили вы',
     run(userId) {
       const entries = storeFor(userId).entries();
-      return entries.length ? [...buildForms([{ checkerId: userId, entries }]), COPY_HINT] : ['Пока нет ни одной проверки.'];
+      return entries.length ? [...buildForms([{ checkerId: userId, entries }], { isInstructor }), COPY_HINT] : ['Пока нет ни одной проверки.'];
     },
   },
 
@@ -258,7 +259,7 @@ const COMMANDS = {
       const groups = allCheckerIds()
         .map((checkerId) => ({ checkerId, entries: storeFor(checkerId).entries() }))
         .filter((g) => g.entries.length);
-      return groups.length ? [...buildForms(groups), COPY_HINT] : ['Пока нет ни одной проверки.'];
+      return groups.length ? [...buildForms(groups, { isInstructor }), COPY_HINT] : ['Пока нет ни одной проверки.'];
     },
   },
 
@@ -690,7 +691,7 @@ async function onConfirmInteraction(interaction) {
 /** Карточка подтверждения с учётом правок: чужие отчёты этого человека нужны, чтобы сказать, пойдёт ли отчёт в премию. */
 function renderCard(token, data, actorId) {
   const { check } = applyEdits(data, data.edits);
-  return confirmMessage(token, data, othersOf(check.userId, check.messageId), prefixFor(actorId, data.ownerId));
+  return confirmMessage(token, data, othersOf(check.userId, check.messageId), prefixFor(actorId, data.ownerId), isInstructor);
 }
 
 /**

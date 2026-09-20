@@ -1,5 +1,5 @@
 // Сборка трёх форм из накопленных проверок.
-import { bonusType } from './parsing.js';
+import { bonusType, instructorDepartment, normalizeDepartment } from './parsing.js';
 
 const LIMIT = 1900; // запас до лимита Discord в 2000 символов
 const UNKNOWN = '???';
@@ -9,6 +9,19 @@ const formLink3 = (link) => link.replace('https://', 'https:/\\/');
 
 export function entryPoints({ verdict, report }) {
   return verdict.points ?? report?.total ?? null;
+}
+
+/**
+ * Должность для формы 3 и карточки. Инструктора узнаём в первую очередь по нику («I.Delta», «Inst.Delta», «Instructor Delta»,
+ * «InstructorDelta»; только английские), а если по нику не понять, то по записи в списке старшего состава (isInstructor).
+ * У инструктора это «Инструктор Delta», у остальных должность из отчёта.
+ */
+export function positionLabel({ verdict, report }, isInstructor = () => false) {
+  const fromNick = instructorDepartment(verdict.position);
+  if (fromNick === null && !isInstructor(verdict.userId)) return report?.position ?? verdict.position ?? UNKNOWN;
+
+  const department = fromNick || normalizeDepartment(report?.position ?? '');
+  return department ? `Инструктор ${department}` : 'Инструктор';
 }
 
 /**
@@ -55,7 +68,7 @@ export function listRows(entries) {
 }
 
 /** Форма 3: по одной строке на человека, из его лучшего принятого отчёта. */
-export function premiumRows(entries) {
+export function premiumRows(entries, isInstructor = () => false) {
   const bonuses = [];
   const warnings = [];
   for (const e of premiumEntries(entries)) {
@@ -67,7 +80,7 @@ export function premiumRows(entries) {
       [
         report?.name ?? UNKNOWN, // как в графе «Сотрудник», без изменений
         report?.rank ?? verdict.rank ?? UNKNOWN, // ранг и должность — из отчёта («Подполковник (12)», «отчёт Delta»)
-        report?.position ?? verdict.position ?? UNKNOWN, // ник из проверки — только если отчёта нет
+        positionLabel(e, isInstructor), // у инструктора «Инструктор Delta», у остальных из отчёта
         formLink3(verdict.link),
         points ?? UNKNOWN,
         type ?? '—',
@@ -78,9 +91,9 @@ export function premiumRows(entries) {
 }
 
 /** Все три формы для одного списка отчётов: принятые, отказанные, премии и предупреждения. */
-export function formRows(entries) {
+export function formRows(entries, { isInstructor } = {}) {
   const lists = listRows(entries);
-  const premium = premiumRows(entries);
+  const premium = premiumRows(entries, isInstructor);
   return { ...lists, bonuses: premium.bonuses, warnings: [...lists.warnings, ...premium.warnings] };
 }
 
@@ -152,10 +165,10 @@ function pack(chunks) {
  * премии — одним общим списком в конце. Предупреждения — отдельным обычным сообщением.
  * Всё идёт обычным текстом, без блоков кода: копировать через «Копировать текст» в меню сообщения (см. COPY_HINT).
  */
-export function buildForms(groups) {
+export function buildForms(groups, { isInstructor } = {}) {
   const rows = groups.map(({ checkerId, entries }) => ({ checkerId, ...listRows(entries) }));
   // Премия одним списком по всем проверяющим: у каждого человека берётся один лучший принятый отчёт.
-  const premium = premiumRows(groups.flatMap((g) => g.entries));
+  const premium = premiumRows(groups.flatMap((g) => g.entries), isInstructor);
 
   const chunks = [];
   for (const [i, r] of rows.entries()) {

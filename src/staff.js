@@ -78,6 +78,11 @@ export class Staff {
     return this.roleKeyOf(userId) !== null;
   }
 
+  /** Внесён ли человек в старший состав рангом «Инструктор». По этой записи бот узнаёт инструкторов, если в нике тега нет. */
+  isInstructor(userId) {
+    return this.roleKeyOf(userId) === 'instructor';
+  }
+
   /** Ранг словами для сообщений: «владелец», «[3] Начальник отдела» или «нет в списке». */
   describeRank(userId) {
     if (this.isOwner(userId)) return 'владелец';
@@ -235,7 +240,7 @@ const textInput = (id, label, { required = true, placeholder, maxLength = 100 } 
       .setPlaceholder(placeholder ?? ''),
   );
 
-const NAME_PLACEHOLDER = '[Инст.Delta] Имя Фамилия';
+const NAME_PLACEHOLDER = '[I.Delta] Ruslan Evil';
 
 /** Окно по кнопке панели: kind — ключ из STAFF_BUTTONS. */
 export function staffModal(kind) {
